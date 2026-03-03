@@ -190,6 +190,8 @@ namespace PCB_Inspection_System
         {
             _topBar = Card(Theme.Surface);
             _topBar.Padding = new Padding(16, 14, 16, 14);
+            _topBar.Margin = new Padding(0);
+
             _root.Controls.Add(_topBar, 0, 0);
             _root.SetColumnSpan(_topBar, 2);
 
@@ -199,23 +201,41 @@ namespace PCB_Inspection_System
                 ColumnCount = 3,
                 RowCount = 1,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0)
+                Margin = new Padding(0),
+                Padding = new Padding(0)
             };
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));   // logo
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // title
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420)); // progress
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));    // logo
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // title
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 360));  // progress
+
             _topBar.Controls.Add(grid);
+
+          
+            var logoHost = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
 
             _pbLogo = new PictureBox
             {
                 Dock = DockStyle.Fill,
-                SizeMode = PictureBoxSizeMode.Zoom,
-                BackColor = Color.Transparent,
+                SizeMode = PictureBoxSizeMode.StretchImage,
+                BackColor = Color.Transparent,   
                 Margin = new Padding(0),
-                Image = LoadLogoSafe()
+               
             };
-            grid.Controls.Add(_pbLogo, 0, 0);
 
+            SetLogoImage(_pbLogo);
+          
+            logoHost.Controls.Add(_pbLogo);
+            grid.Controls.Add(logoHost, 0, 0);
+
+          
             var titleStack = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -236,6 +256,7 @@ namespace PCB_Inspection_System
                 ForeColor = Theme.Text,
                 TextAlign = ContentAlignment.MiddleLeft
             };
+
             _lbSub = new Label
             {
                 Dock = DockStyle.Fill,
@@ -248,7 +269,7 @@ namespace PCB_Inspection_System
             titleStack.Controls.Add(_lbSub, 0, 1);
             grid.Controls.Add(titleStack, 1, 0);
 
-            // Progress nhỏ (mảnh)
+            // ===== Progress =====
             var progWrap = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -282,6 +303,18 @@ namespace PCB_Inspection_System
             progWrap.Controls.Add(_lbProgText, 0, 0);
             progWrap.Controls.Add(_progTop, 0, 1);
             grid.Controls.Add(progWrap, 2, 0);
+        }
+
+        private void SetLogoImage(PictureBox pb)
+        {
+            var img = LoadLogoSafe();
+
+            // tránh leak
+            var old = pb.Image;
+            pb.Image = img;
+            old?.Dispose();
+
+            Debug.WriteLine(img == null ? "LOGO: NULL" : $"LOGO: OK ({img.Width}x{img.Height})");
         }
 
         private void BuildViewport()
@@ -848,15 +881,19 @@ namespace PCB_Inspection_System
             if (!File.Exists(scriptPath))
                 throw new FileNotFoundException("Không tìm thấy server.py", scriptPath);
 
+            string pyLauncher = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "py.exe");
+            if (!File.Exists(pyLauncher)) pyLauncher = "python";
+
             var psi = new ProcessStartInfo
             {
-                FileName = "python",
+                FileName = pyLauncher,
                 WorkingDirectory = workDir,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
-                RedirectStandardError = true,
+                RedirectStandardError = true
             };
+
            // psi.ArgumentList.Add("-3.11");
             psi.ArgumentList.Add(scriptPath);
 
@@ -877,7 +914,7 @@ namespace PCB_Inspection_System
             _pythonProcess.BeginOutputReadLine();
             _pythonProcess.BeginErrorReadLine();
 
-            await WaitForServerAsync("http://127.0.0.1:8000/docs", timeoutMs: 9000);
+            await WaitForServerAsync("http://127.0.0.1:8000/docs", timeoutMs: 8000);
         }
 
         private static async Task WaitForServerAsync(string url, int timeoutMs)
@@ -894,6 +931,7 @@ namespace PCB_Inspection_System
                         return;
                 }
                 catch { }
+
                 await Task.Delay(300);
             }
 
@@ -1166,15 +1204,14 @@ namespace PCB_Inspection_System
             _rtbLog.ScrollToCaret();
         }
 
-        private Image? LoadLogoSafe()
+        private Image LoadLogoSafe()
         {
-            try
-            {
-                string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "AI_Server", "logo.png");
-                if (File.Exists(path)) return Image.FromFile(path);
-            }
-            catch { }
-            return null;
+            var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mcnex", "Logo.png");
+            if (!File.Exists(path)) return new Bitmap(1, 1);
+
+   
+            using var bmpTemp = new Bitmap(path);
+            return new Bitmap(bmpTemp);
         }
 
         private readonly record struct LogItem(string Tag, string Message, Color Color);
@@ -1504,6 +1541,29 @@ namespace PCB_Inspection_System
             public int ok_count { get; set; }
             public int ng_count { get; set; }
             public string image_base64 { get; set; } = "";
+        }
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+
+            this.Icon = AppIconProvider.Get(); 
+            this.ShowInTaskbar = true;
+            this.ShowIcon = true;
+            this.ControlBox = true;
+        }
+        static class AppIconProvider
+        {
+            private static Icon? _icon;
+
+            public static Icon Get()
+            {
+                if (_icon != null) return _icon;
+
+        
+                var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mcnex", "Icon.ico");
+                _icon = File.Exists(path) ? new Icon(path) : SystemIcons.Application;
+                return _icon;
+            }
         }
     }
 }

@@ -7,11 +7,31 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>mcnex\Icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
+    <Content Include="mcnex\Icon.ico">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <Resource Include="mcnex\Icon.ico">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Resource>
+  </ItemGroup>
+
+	<PropertyGroup>
+		<ApplicationIcon>mcnex\Icon.ico</ApplicationIcon>
+	</PropertyGroup>
+  <ItemGroup>
     <PackageReference Include="AForge.Video" Version="2.2.5" />
     <PackageReference Include="AForge.Video.DirectShow" Version="2.2.5" />
+    <Content Include="mcnex\Logo.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
 	<None Update="Data\**\*.*">
 		<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</None>
