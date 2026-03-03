@@ -1,0 +1,59 @@
+## [Visual Studio]
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# User-specific files (MonoDevelop/Xamarin Studio)
+*.userprefs
+
+# Mono auto generated files
+mono_crash.*
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][In][32]/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bbin/
+obj/
+external/
+node_modules/
+
+# Visual Studio 2015/2017/2019/2022 cache directory
+.vs/
+# Unlock the line below if you want to check in the Visual Studio 2017+ project settings
+#!.vs/config/
+
+# MSTest test Results
+TestResults/
+[Bb]uildLog.htm
+
+# SQL Server files
+*.mdf
+*.ldf
+*.ndf
+
+# Packages directory folder
+packages/
+# Nếu bạn dùng NuGet nội bộ, có thể bỏ qua dòng này, 
+# nhưng thường thì ta để NuGet tự restore thay vì đẩy lên Git.
+!packages/repositories.config
+
+# Others
+ClientBin/
+~$*
+*~
+*.log
+*.tmp
+*.cache
+oder linh kiện.xlsx
+
+!McuCdc.Modbus.dll
