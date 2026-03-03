@@ -107,33 +107,84 @@ namespace PCB_Inspection_System
                 videoSource = null;
             }
         }
-        private void StartPythonServer()
+     
+
+        private async Task StartPythonServerAsync()
         {
             StopPythonServer(); // đảm bảo không có tiến trình cũ
 
-            string exePath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
-                "AI_Server",
-                "server.py"
-            );
+            string workDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "AI_Server");
+            string scriptPath = Path.Combine(workDir, "server.py");
 
-            string pythonExe = "python";
+            if (!File.Exists(scriptPath))
+                throw new FileNotFoundException("Không tìm thấy server.py", scriptPath);
+
+           
+            string pyLauncher = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "py.exe");
+            if (!File.Exists(pyLauncher))
+                pyLauncher = "py"; 
 
             var psi = new ProcessStartInfo
             {
-                FileName = pythonExe,
-                Arguments = $"\"{exePath}\"",
-                WorkingDirectory = Path.GetDirectoryName(exePath),
+                FileName = pyLauncher,
+                WorkingDirectory = workDir,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
             };
 
-            _pythonProcess = Process.Start(psi);
+            // py -3.11 "server.py"
+            psi.ArgumentList.Add("-3.11");
+            psi.ArgumentList.Add(scriptPath);
 
-            // Đợi server khởi động (2-3 giây)
-            Thread.Sleep(3000);
-            //http://127.0.0.1:8000/docs
+            _pythonProcess = new Process { StartInfo = psi, EnableRaisingEvents = true };
+
+            _pythonProcess.OutputDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data))
+                    Debug.WriteLine("[PY] " + e.Data);
+            };
+            _pythonProcess.ErrorDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data))
+                    Debug.WriteLine("[PY-ERR] " + e.Data);
+            };
+
+            if (!_pythonProcess.Start())
+                throw new InvalidOperationException("Không start được Python process.");
+
+            _pythonProcess.BeginOutputReadLine();
+            _pythonProcess.BeginErrorReadLine();
+
+        
+            await WaitForServerAsync("http://127.0.0.1:8000/docs", timeoutMs: 8000);
         }
+
+        private static async Task WaitForServerAsync(string url, int timeoutMs)
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(1000) };
+            var sw = Stopwatch.StartNew();
+
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                try
+                {
+                    using var resp = await http.GetAsync(url);
+                    if ((int)resp.StatusCode >= 200 && (int)resp.StatusCode < 500)
+                        return; 
+                }
+                catch
+                {
+                    
+                }
+
+                await Task.Delay(300);
+            }
+
+            throw new TimeoutException("Python server chưa khởi động kịp trong thời gian cho phép.");
+        }
+
         private void StopPythonServer()
         {
             try
@@ -272,7 +323,7 @@ namespace PCB_Inspection_System
 
         private void btn_load_Click(object sender, EventArgs e)
         {
-            StartPythonServer();
+            StartPythonServerAsync();
             MessageBox.Show("AI Server restarted.");
         }
 
