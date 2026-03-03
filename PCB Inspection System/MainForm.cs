@@ -1,6 +1,7 @@
 ﻿using AForge.Video;
 using AForge.Video.DirectShow;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -9,6 +10,8 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -17,7 +20,6 @@ namespace PCB_Inspection_System
 {
     public partial class MainForm : Form
     {
-      
         private Process? _pythonProcess;
         private FilterInfoCollection? _videoDevices;
         private VideoCaptureDevice? _videoSource;
@@ -29,11 +31,22 @@ namespace PCB_Inspection_System
         private bool _isClosing;
 
         private static readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+        private long _totalOk = 0;
+        private long _totalNg = 0;
+        private bool _lCtrlDown, _rCtrlDown, _ctrlComboFired;
+        private const int VK_LCONTROL = 0xA2;
+        private const int VK_RCONTROL = 0xA3;
 
-   
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        private void UpdateCtrlStates()
+        {
+            _lCtrlDown = (GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0;
+            _rCtrlDown = (GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0;
+        }
+
         private TableLayoutPanel _root = new();
-
-       
         private RoundedPanel _topBar = new();
         private PictureBox _pbLogo = new();
         private Label _lbTitle = new();
@@ -41,7 +54,6 @@ namespace PCB_Inspection_System
         private Label _lbProgText = new();
         private ModernProgressBar _progTop = new();
 
-      
         private RoundedPanel _viewportCard = new();
         private Panel _viewportHost = new();
         private RoundedPanel _panelLive = new();
@@ -50,17 +62,26 @@ namespace PCB_Inspection_System
         private PictureBox _pbResult = new();
         private bool _detectedMode;
 
-       
         private RoundedPanel _rightCard = new();
         private ComboBox _cbModel = new();
         private ModernButton _btnRestartServer = new();
         private ModernButton _btnDetect = new();
+
         private Label _lbOk = new();
         private Label _lbNg = new();
+        private Label _lbTotalOk = new();
+        private Label _lbTotalNg = new();
 
-     
         private RoundedPanel _logCard = new();
         private RichTextBox _rtbLog = new();
+
+        private readonly ConcurrentQueue<LogItem> _logQueue = new();
+        private readonly System.Windows.Forms.Timer _logFlushTimer = new() { Interval = 80 };
+
+        private System.Windows.Forms.Timer? _viewAnimTimer;
+        private readonly Stopwatch _viewAnimSw = new();
+        private Rectangle _liveFrom, _liveTo, _resFrom, _resTo;
+        private bool _hideResultAfterAnim;
 
         public MainForm()
         {
@@ -72,7 +93,6 @@ namespace PCB_Inspection_System
             ForeColor = Theme.Text;
             Font = new Font("Segoe UI", 10f);
 
-          
             WindowState = FormWindowState.Maximized;
             MaximizedBounds = Screen.FromControl(this).WorkingArea;
 
@@ -80,9 +100,20 @@ namespace PCB_Inspection_System
 
             BuildUI();
 
+            UiPerf.EnableDoubleBuffer(this);
+            UiPerf.EnableDoubleBuffer(_viewportHost);
+            UiPerf.EnableDoubleBuffer(_viewportCard);
+
+            _logFlushTimer.Tick += (_, __) => FlushLogBatch(maxLines: 60);
+            _logFlushTimer.Start();
+
+ 
+            KeyPreview = true;
+            KeyDown += MainForm_KeyDown;
+            KeyUp += MainForm_KeyUp;
+
             Shown += async (_, __) =>
             {
-               
                 WindowState = FormWindowState.Maximized;
                 MaximizedBounds = Screen.FromControl(this).WorkingArea;
 
@@ -102,7 +133,29 @@ namespace PCB_Inspection_System
             Resize += (_, __) => ApplyViewportLayout(animated: false);
             FormClosing += OnFormClosing;
         }
+        private async void MainForm_KeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != Keys.ControlKey) return;
 
+            UpdateCtrlStates();
+            if (_lCtrlDown && _rCtrlDown && !_ctrlComboFired)
+            {
+                _ctrlComboFired = true;
+                e.Handled = true;
+
+                if (!_isDetecting)
+                    await DetectAsync();
+            }
+        }
+
+        private void MainForm_KeyUp(object? sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != Keys.ControlKey) return;
+
+            UpdateCtrlStates();
+            if (!(_lCtrlDown && _rCtrlDown))
+                _ctrlComboFired = false;
+        }
         private void BuildUI()
         {
             SuspendLayout();
@@ -120,11 +173,9 @@ namespace PCB_Inspection_System
             _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             _root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 380));
 
-         
             _root.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
             _root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             _root.RowStyles.Add(new RowStyle(SizeType.Absolute, 230));
-
             Controls.Add(_root);
 
             BuildTopBar();
@@ -138,7 +189,6 @@ namespace PCB_Inspection_System
         private void BuildTopBar()
         {
             _topBar = Card(Theme.Surface);
-            _topBar.Dock = DockStyle.Fill;
             _topBar.Padding = new Padding(16, 14, 16, 14);
             _root.Controls.Add(_topBar, 0, 0);
             _root.SetColumnSpan(_topBar, 2);
@@ -151,9 +201,9 @@ namespace PCB_Inspection_System
                 BackColor = Color.Transparent,
                 Margin = new Padding(0)
             };
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));   
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420)); 
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));   // logo
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // title
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420)); // progress
             _topBar.Controls.Add(grid);
 
             _pbLogo = new PictureBox
@@ -161,12 +211,11 @@ namespace PCB_Inspection_System
                 Dock = DockStyle.Fill,
                 SizeMode = PictureBoxSizeMode.Zoom,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0)
+                Margin = new Padding(0),
+                Image = LoadLogoSafe()
             };
-            _pbLogo.Image = LoadLogoSafe();
             grid.Controls.Add(_pbLogo, 0, 0);
 
-         
             var titleStack = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -199,7 +248,7 @@ namespace PCB_Inspection_System
             titleStack.Controls.Add(_lbSub, 0, 1);
             grid.Controls.Add(titleStack, 1, 0);
 
-   
+            // Progress nhỏ (mảnh)
             var progWrap = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -209,8 +258,8 @@ namespace PCB_Inspection_System
                 Padding = new Padding(8, 4, 8, 0),
                 Margin = new Padding(0)
             };
-            progWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 22)); 
-            progWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 12)); 
+            progWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+            progWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
 
             _lbProgText = new Label
             {
@@ -238,7 +287,6 @@ namespace PCB_Inspection_System
         private void BuildViewport()
         {
             _viewportCard = Card(Theme.Surface);
-            _viewportCard.Dock = DockStyle.Fill;
             _viewportCard.Padding = new Padding(12);
             _root.Controls.Add(_viewportCard, 0, 1);
 
@@ -262,7 +310,6 @@ namespace PCB_Inspection_System
         private void BuildRightPanel()
         {
             _rightCard = Card(Theme.Surface);
-            _rightCard.Dock = DockStyle.Fill;
             _rightCard.Padding = new Padding(12);
             _root.Controls.Add(_rightCard, 1, 1);
 
@@ -270,12 +317,11 @@ namespace PCB_Inspection_System
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 11,
+                RowCount = 10,
                 BackColor = Color.Transparent,
                 Margin = new Padding(0)
             };
 
-        
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); // model label
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 44)); // combo
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
@@ -283,9 +329,8 @@ namespace PCB_Inspection_System
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 56)); // detect
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 125)); // summary
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 210)); // summary bigger (có totals)
             grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 8));
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 8));
 
             _rightCard.Controls.Add(grid);
@@ -333,12 +378,22 @@ namespace PCB_Inspection_System
             };
             _btnDetect.Click += async (_, __) => await DetectAsync();
             grid.Controls.Add(_btnDetect, 0, 5);
+            var summaryWrap = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            summaryWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+            summaryWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+            var cardCurrent = Card(Theme.Surface2);
+            cardCurrent.CornerRadius = 14;
+            cardCurrent.Padding = new Padding(12);
 
-            var summary = Card(Theme.Surface2);
-            summary.CornerRadius = 14;
-            summary.Padding = new Padding(12);
-
-            var sgrid = new TableLayoutPanel
+            var curGrid = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
@@ -346,19 +401,20 @@ namespace PCB_Inspection_System
                 BackColor = Color.Transparent,
                 Margin = new Padding(0)
             };
-            sgrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            sgrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            sgrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-            sgrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            curGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            curGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            curGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+            curGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            sgrid.Controls.Add(new Label
+            var lbCurTitle = new Label
             {
                 Dock = DockStyle.Fill,
-                Text = "Result Summary",
+                Text = "CURRENT (This Detect)",
                 ForeColor = Theme.Muted,
                 TextAlign = ContentAlignment.MiddleLeft
-            }, 0, 0);
-            sgrid.SetColumnSpan(sgrid.Controls[sgrid.Controls.Count - 1], 2);
+            };
+            curGrid.Controls.Add(lbCurTitle, 0, 0);
+            curGrid.SetColumnSpan(lbCurTitle, 2);
 
             _lbOk = new Label
             {
@@ -378,17 +434,68 @@ namespace PCB_Inspection_System
                 TextAlign = ContentAlignment.MiddleLeft
             };
 
-            sgrid.Controls.Add(_lbOk, 0, 1);
-            sgrid.Controls.Add(_lbNg, 1, 1);
+            curGrid.Controls.Add(_lbOk, 0, 1);
+            curGrid.Controls.Add(_lbNg, 1, 1);
 
-            summary.Controls.Add(sgrid);
-            grid.Controls.Add(summary, 0, 7);
+            cardCurrent.Controls.Add(curGrid);
+            var cardTotal = Card(Theme.Surface2);
+            cardTotal.CornerRadius = 14;
+            cardTotal.Padding = new Padding(12);
+
+            var totGrid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 2,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
+            totGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            totGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            totGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+            totGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            var lbTotTitle = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "TOTAL (Checked Count)",
+                ForeColor = Theme.Muted,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            totGrid.Controls.Add(lbTotTitle, 0, 0);
+            totGrid.SetColumnSpan(lbTotTitle, 2);
+
+            _lbTotalOk = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "Total OK: 0",
+                Font = new Font("Segoe UI Semibold", 12f),
+                ForeColor = Theme.Ok,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            _lbTotalNg = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "Total NG: 0",
+                Font = new Font("Segoe UI Semibold", 12f),
+                ForeColor = Theme.Ng,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            totGrid.Controls.Add(_lbTotalOk, 0, 1);
+            totGrid.Controls.Add(_lbTotalNg, 1, 1);
+
+            cardTotal.Controls.Add(totGrid);
+
+            summaryWrap.Controls.Add(cardCurrent, 0, 0);
+            summaryWrap.Controls.Add(cardTotal, 0, 1);
+            grid.Controls.Add(summaryWrap, 0, 7);
         }
 
         private void BuildLogPanel()
         {
             _logCard = Card(Theme.Surface);
-            _logCard.Dock = DockStyle.Fill;
             _logCard.Padding = new Padding(12);
             _root.Controls.Add(_logCard, 0, 2);
             _root.SetColumnSpan(_logCard, 2);
@@ -402,13 +509,6 @@ namespace PCB_Inspection_System
                 Font = new Font("Segoe UI Semibold", 11f),
                 ForeColor = Theme.Text,
                 TextAlign = ContentAlignment.MiddleLeft
-            });
-            header.Controls.Add(new Label
-            {
-                Dock = DockStyle.Fill,
-            
-                ForeColor = Theme.Muted,
-                TextAlign = ContentAlignment.MiddleRight
             });
 
             var wrap = Card(Theme.Surface2);
@@ -431,7 +531,6 @@ namespace PCB_Inspection_System
             _logCard.Controls.Add(header);
         }
 
-     
         private RoundedPanel ViewportPanel(string title, string subtitle, out PictureBox pb)
         {
             var p = new RoundedPanel
@@ -446,6 +545,8 @@ namespace PCB_Inspection_System
                 Anchor = AnchorStyles.Top | AnchorStyles.Left,
                 Margin = new Padding(0)
             };
+
+            UiPerf.EnableDoubleBuffer(p);
 
             var header = new Panel { Dock = DockStyle.Top, Height = 34, BackColor = Color.Transparent };
 
@@ -488,7 +589,6 @@ namespace PCB_Inspection_System
             Dock = DockStyle.Fill
         };
 
-   
         private void ApplyViewportLayout(bool animated)
         {
             var bounds = _viewportHost.ClientRectangle;
@@ -497,18 +597,15 @@ namespace PCB_Inspection_System
             const int gap = 12;
 
             Rectangle liveTarget;
-            Rectangle resultTarget;
+            Rectangle resTarget;
 
             if (!_detectedMode)
             {
-                // LIVE full
                 liveTarget = bounds;
-                // RESULT đẩy ra ngoài (ẩn)
-                resultTarget = new Rectangle(bounds.Right + gap, bounds.Y, Math.Max(10, bounds.Width / 5), bounds.Height);
+                resTarget = new Rectangle(bounds.Right + gap, bounds.Y, Math.Max(10, bounds.Width / 5), bounds.Height);
             }
             else
             {
-                // RESULT left big, LIVE right small
                 int rightW = Math.Clamp((int)(bounds.Width * 0.30), 280, 460);
                 int leftW = bounds.Width - rightW - gap;
                 leftW = Math.Max(520, leftW);
@@ -519,36 +616,28 @@ namespace PCB_Inspection_System
                     leftW = bounds.Width - rightW - gap;
                 }
 
-                resultTarget = new Rectangle(bounds.X, bounds.Y, leftW, bounds.Height);
+                resTarget = new Rectangle(bounds.X, bounds.Y, leftW, bounds.Height);
                 liveTarget = new Rectangle(bounds.Right - rightW, bounds.Y, rightW, bounds.Height);
             }
 
             if (!animated)
             {
                 _panelLive.Bounds = liveTarget;
-                _panelResult.Bounds = resultTarget;
+                _panelResult.Bounds = resTarget;
                 _panelResult.Visible = _detectedMode;
 
-         
                 _panelLive.BringToFront();
+                _panelLive.RefreshRegionNow();
+                _panelResult.RefreshRegionNow();
                 return;
             }
-
             _panelResult.Visible = true;
 
-            Animator.AnimateRect(_panelLive, "live",
-                () => _panelLive.Bounds, r => _panelLive.Bounds = r,
-                liveTarget, 220, Animator.EaseOutCubic);
-
-            Animator.AnimateRect(_panelResult, "result",
-                () => _panelResult.Bounds, r => _panelResult.Bounds = r,
-                resultTarget, 220, Animator.EaseOutCubic,
-                completed: () =>
-                {
-                    if (!_detectedMode) _panelResult.Visible = false;
-                });
-
-            _panelLive.BringToFront();
+            StartViewportAnimation(
+                liveTo: liveTarget,
+                resTo: resTarget,
+                hideResultAfter: !_detectedMode
+            );
         }
 
         private void EnterDetectedMode()
@@ -564,7 +653,71 @@ namespace PCB_Inspection_System
             ApplyViewportLayout(animated: true);
         }
 
+        private void StartViewportAnimation(Rectangle liveTo, Rectangle resTo, bool hideResultAfter)
+        {
+            StopViewportAnimation();
 
+            _hideResultAfterAnim = hideResultAfter;
+
+            _liveFrom = _panelLive.Bounds;
+            _resFrom = _panelResult.Bounds;
+
+            _liveTo = liveTo;
+            _resTo = resTo;
+            _panelLive.SuppressRegionUpdate = true;
+            _panelResult.SuppressRegionUpdate = true;
+
+            _viewAnimSw.Restart();
+            _viewAnimTimer = new System.Windows.Forms.Timer { Interval = 16 }; // ~60fps
+            _viewAnimTimer.Tick += (_, __) =>
+            {
+                const int durationMs = 240;
+
+                float t = (float)_viewAnimSw.ElapsedMilliseconds / durationMs;
+                if (t >= 1f) t = 1f;
+
+                float k = EaseOutCubic(t);
+
+                _panelLive.Bounds = LerpRect(_liveFrom, _liveTo, k);
+                _panelResult.Bounds = LerpRect(_resFrom, _resTo, k);
+
+                _panelLive.BringToFront();
+
+                if (t >= 1f)
+                {
+                    StopViewportAnimation();
+
+                    if (_hideResultAfterAnim)
+                        _panelResult.Visible = false;
+                    _panelLive.SuppressRegionUpdate = false;
+                    _panelResult.SuppressRegionUpdate = false;
+                    _panelLive.RefreshRegionNow();
+                    _panelResult.RefreshRegionNow();
+                }
+            };
+            _viewAnimTimer.Start();
+        }
+
+        private void StopViewportAnimation()
+        {
+            if (_viewAnimTimer != null)
+            {
+                _viewAnimTimer.Stop();
+                _viewAnimTimer.Dispose();
+                _viewAnimTimer = null;
+            }
+        }
+
+        private static float EaseOutCubic(float t) => 1f - (float)Math.Pow(1f - t, 3);
+
+        private static Rectangle LerpRect(Rectangle a, Rectangle b, float t)
+        {
+            int x = a.X + (int)Math.Round((b.X - a.X) * t);
+            int y = a.Y + (int)Math.Round((b.Y - a.Y) * t);
+            int w = a.Width + (int)Math.Round((b.Width - a.Width) * t);
+            int h = a.Height + (int)Math.Round((b.Height - a.Height) * t);
+            return new Rectangle(x, y, w, h);
+        }
         private void StartCamera()
         {
             try
@@ -611,7 +764,7 @@ namespace PCB_Inspection_System
             }
 
             _displayFrameCounter++;
-            if (_displayFrameCounter % 3 != 0) return; // giảm tải
+            if (_displayFrameCounter % 3 != 0) return;
 
             Bitmap displayFrame = new Bitmap(640, 480);
             using (Graphics g = Graphics.FromImage(displayFrame))
@@ -660,7 +813,6 @@ namespace PCB_Inspection_System
             catch { }
         }
 
- 
         private async Task RestartServerAsync()
         {
             try
@@ -705,7 +857,7 @@ namespace PCB_Inspection_System
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-         //   psi.ArgumentList.Add("-3.11");
+           // psi.ArgumentList.Add("-3.11");
             psi.ArgumentList.Add(scriptPath);
 
             _pythonProcess = new Process { StartInfo = psi, EnableRaisingEvents = true };
@@ -761,8 +913,6 @@ namespace PCB_Inspection_System
             }
             catch { }
         }
-
-
         private void LoadModels()
         {
             try
@@ -875,11 +1025,17 @@ namespace PCB_Inspection_System
                     return;
                 }
 
+       
                 _lbOk.Text = $"OK: {result.ok_count}";
                 _lbNg.Text = $"NG: {result.ng_count}";
 
+                _totalOk += result.ok_count;
+                _totalNg += result.ng_count;
+                _lbTotalOk.Text = $"Total OK: {_totalOk}";
+                _lbTotalNg.Text = $"Total NG: {_totalNg}";
+
                 SetTopProgress($"Done • OK {result.ok_count} • NG {result.ng_count}", indeterminate: false, value: 100);
-                LogOk($"Detect done. OK={result.ok_count}, NG={result.ng_count}");
+                LogOk($"Detect done. OK={result.ok_count}, NG={result.ng_count} | TotalOK={_totalOk}, TotalNG={_totalNg}");
             }
             catch (Exception ex)
             {
@@ -945,6 +1101,10 @@ namespace PCB_Inspection_System
         private async void OnFormClosing(object? sender, FormClosingEventArgs e)
         {
             _isClosing = true;
+
+            StopViewportAnimation();
+            _logFlushTimer.Stop();
+
             StopCamera();
             StopPythonServer();
 
@@ -969,27 +1129,40 @@ namespace PCB_Inspection_System
             _progTop.Value = indeterminate ? 0 : Math.Clamp(value, 0, 100);
         }
 
-        private void LogInfo(string msg) => AppendLog("INFO", msg, Theme.LogInfo);
-        private void LogOk(string msg) => AppendLog("OK", msg, Theme.LogOk);
-        private void LogError(string msg) => AppendLog("ERR", msg, Theme.LogErr);
+        private void LogInfo(string msg) => EnqueueLog("INFO", msg, Theme.LogInfo);
+        private void LogOk(string msg) => EnqueueLog("OK", msg, Theme.LogOk);
+        private void LogError(string msg) => EnqueueLog("ERR", msg, Theme.LogErr);
 
-        private void AppendLog(string tag, string msg, Color color)
+        private void EnqueueLog(string tag, string msg, Color color)
+        {
+            _logQueue.Enqueue(new LogItem(tag, msg, color));
+        }
+
+        private void FlushLogBatch(int maxLines)
         {
             if (_rtbLog.IsDisposed) return;
+            if (!_rtbLog.IsHandleCreated) return;
+
+            if (_logQueue.IsEmpty) return;
 
             if (InvokeRequired)
             {
-                BeginInvoke(new Action(() => AppendLog(tag, msg, color)));
+                BeginInvoke(new Action(() => FlushLogBatch(maxLines)));
                 return;
             }
 
-            var line = $"{DateTime.Now:HH:mm:ss} [{tag}] {msg}\n";
+            int count = 0;
+            while (count < maxLines && _logQueue.TryDequeue(out var item))
+            {
+                var line = $"{DateTime.Now:HH:mm:ss} [{item.Tag}] {item.Message}\n";
+                _rtbLog.SelectionStart = _rtbLog.TextLength;
+                _rtbLog.SelectionLength = 0;
+                _rtbLog.SelectionColor = item.Color;
+                _rtbLog.AppendText(line);
+                _rtbLog.SelectionColor = Theme.Text;
+                count++;
+            }
 
-            _rtbLog.SelectionStart = _rtbLog.TextLength;
-            _rtbLog.SelectionLength = 0;
-            _rtbLog.SelectionColor = color;
-            _rtbLog.AppendText(line);
-            _rtbLog.SelectionColor = Theme.Text;
             _rtbLog.ScrollToCaret();
         }
 
@@ -1004,6 +1177,7 @@ namespace PCB_Inspection_System
             return null;
         }
 
+        private readonly record struct LogItem(string Tag, string Message, Color Color);
 
         private static class Theme
         {
@@ -1012,7 +1186,7 @@ namespace PCB_Inspection_System
             public static readonly Color Surface2 = Color.FromArgb(248, 249, 251);
 
             public static readonly Color Border = Color.FromArgb(220, 226, 235);
-            public static readonly Color Shadow = Color.FromArgb(24, 0, 0, 0);
+            public static readonly Color Shadow = Color.FromArgb(18, 0, 0, 0);
 
             public static readonly Color Text = Color.FromArgb(25, 33, 45);
             public static readonly Color Muted = Color.FromArgb(92, 105, 125);
@@ -1038,6 +1212,37 @@ namespace PCB_Inspection_System
             public static readonly Color LogErr = Color.FromArgb(200, 40, 55);
         }
 
+        private static class UiPerf
+        {
+            public static void EnableDoubleBuffer(Control c)
+            {
+                if (c is null) return;
+
+                try
+                {
+                    typeof(Control)
+                        .GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic)
+                        ?.SetValue(c, true, null);
+                    typeof(Control)
+                        .GetMethod("SetStyle", BindingFlags.Instance | BindingFlags.NonPublic)
+                        ?.Invoke(c, new object[]
+                        {
+                    ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.UserPaint |
+                    ControlStyles.OptimizedDoubleBuffer,
+                    true
+                        });
+
+                    typeof(Control)
+                        .GetMethod("UpdateStyles", BindingFlags.Instance | BindingFlags.NonPublic)
+                        ?.Invoke(c, null);
+                }
+                catch
+                {
+                    
+                }
+            }
+        }
 
         private sealed class RoundedPanel : Panel
         {
@@ -1046,6 +1251,11 @@ namespace PCB_Inspection_System
             public Color BorderColor { get; set; } = Theme.Border;
             public float BorderThickness { get; set; } = 1f;
 
+            public bool SuppressRegionUpdate { get; set; } = false;
+
+            private GraphicsPath? _cachedPath;
+            private Rectangle _cachedRect;
+
             public RoundedPanel()
             {
                 SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
@@ -1053,13 +1263,27 @@ namespace PCB_Inspection_System
                 Margin = new Padding(0);
             }
 
-            protected override void OnResize(EventArgs e)
+            protected override void OnSizeChanged(EventArgs e)
             {
-                base.OnResize(e);
+                base.OnSizeChanged(e);
+
+                if (SuppressRegionUpdate) return;
+                RefreshRegionNow();
+            }
+
+            public void RefreshRegionNow()
+            {
                 if (Width <= 2 || Height <= 2) return;
 
-                using var path = RoundRect(new Rectangle(0, 0, Width, Height), CornerRadius);
-                Region = new Region(path);
+                var rect = new Rectangle(0, 0, Width, Height);
+                if (rect == _cachedRect && _cachedPath != null) return;
+
+                _cachedRect = rect;
+
+                _cachedPath?.Dispose();
+                _cachedPath = RoundRect(new Rectangle(0, 0, Width, Height), CornerRadius);
+
+                Region = new Region(_cachedPath);
                 Invalidate();
             }
 
@@ -1211,10 +1435,10 @@ namespace PCB_Inspection_System
                 Height = 10;
                 Margin = new Padding(0);
 
-                _timer = new System.Windows.Forms.Timer { Interval = 15 };
+                _timer = new System.Windows.Forms.Timer { Interval = 30 };
                 _timer.Tick += (_, __) =>
                 {
-                    _phase = (_phase + 6) % Math.Max(1, Width + 120);
+                    _phase = (_phase + 10) % Math.Max(1, Width + 120);
                     Invalidate();
                 };
             }
@@ -1232,7 +1456,7 @@ namespace PCB_Inspection_System
 
                 if (Indeterminate)
                 {
-                    int segW = Math.Max(28, (int)(Width * 0.24));
+                    int segW = Math.Max(24, (int)(Width * 0.24));
                     int x = _phase - segW;
                     var segRect = new Rectangle(x, rect.Y, segW, rect.Height);
                     using var segPath = RoundRect(segRect, CornerRadius);
@@ -1275,74 +1499,6 @@ namespace PCB_Inspection_System
             }
         }
 
-        private static class Animator
-        {
-            private static readonly Dictionary<(Control, string), Action> _running = new();
-
-            public static void Stop(Control c, string name)
-            {
-                if (_running.TryGetValue((c, name), out var cancel))
-                {
-                    cancel();
-                    _running.Remove((c, name));
-                }
-            }
-
-            public static void AnimateRect(
-                Control c, string name,
-                Func<Rectangle> get, Action<Rectangle> set,
-                Rectangle to, int durationMs,
-                Func<float, float> easing,
-                Action? completed = null)
-            {
-                Stop(c, name);
-
-                var from = get();
-                if (from == to) { completed?.Invoke(); return; }
-
-                var sw = Stopwatch.StartNew();
-                var timer = new System.Windows.Forms.Timer { Interval = 15 };
-
-                void Cancel()
-                {
-                    timer.Stop();
-                    timer.Dispose();
-                }
-
-                _running[(c, name)] = Cancel;
-
-                timer.Tick += (_, __) =>
-                {
-                    float t = (float)sw.ElapsedMilliseconds / durationMs;
-                    if (t >= 1f) t = 1f;
-
-                    float k = easing(t);
-                    set(Lerp(from, to, k));
-
-                    if (t >= 1f)
-                    {
-                        Cancel();
-                        _running.Remove((c, name));
-                        completed?.Invoke();
-                    }
-                };
-
-                timer.Start();
-            }
-
-            private static Rectangle Lerp(Rectangle a, Rectangle b, float t)
-            {
-                int x = a.X + (int)Math.Round((b.X - a.X) * t);
-                int y = a.Y + (int)Math.Round((b.Y - a.Y) * t);
-                int w = a.Width + (int)Math.Round((b.Width - a.Width) * t);
-                int h = a.Height + (int)Math.Round((b.Height - a.Height) * t);
-                return new Rectangle(x, y, w, h);
-            }
-
-            public static float EaseOutCubic(float t) => 1f - (float)Math.Pow(1f - t, 3);
-        }
-
-    
         public sealed class DetectResult
         {
             public int ok_count { get; set; }
