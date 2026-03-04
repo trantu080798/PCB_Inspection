@@ -2,7 +2,7 @@
 using AForge.Video.DirectShow;
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -20,10 +20,11 @@ namespace PCB_Inspection_System
 {
     public partial class MainForm : Form
     {
+
         private Process? _pythonProcess;
         private FilterInfoCollection? _videoDevices;
         private VideoCaptureDevice? _videoSource;
-
+        private RoundedPanel _logCard = null!;
         private Bitmap? _currentFrame;
         private readonly object _frameLock = new();
         private volatile bool _isDetecting;
@@ -31,8 +32,17 @@ namespace PCB_Inspection_System
         private bool _isClosing;
 
         private static readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+
         private long _totalOk = 0;
         private long _totalNg = 0;
+
+        private readonly BindingList<DetectHistoryRow> _history = new();
+        private DataGridView _gvHistory = null!;
+
+        private readonly ConcurrentQueue<LogItem> _logQueue = new();
+        private readonly System.Windows.Forms.Timer _logFlushTimer = new() { Interval = 80 };
+        private RichTextBox _rtbLog = null!;
+
         private bool _lCtrlDown, _rCtrlDown, _ctrlComboFired;
         private const int VK_LCONTROL = 0xA2;
         private const int VK_RCONTROL = 0xA3;
@@ -46,38 +56,36 @@ namespace PCB_Inspection_System
             _rCtrlDown = (GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0;
         }
 
-        private TableLayoutPanel _root = new();
-        private RoundedPanel _topBar = new();
-        private PictureBox _pbLogo = new();
-        private Label _lbTitle = new();
-        private Label _lbSub = new();
-        private Label _lbProgText = new();
-        private ModernProgressBar _progTop = new();
+        private TableLayoutPanel _root = null!;
 
-        private RoundedPanel _viewportCard = new();
-        private Panel _viewportHost = new();
-        private RoundedPanel _panelLive = new();
-        private RoundedPanel _panelResult = new();
-        private PictureBox _pbLive = new();
-        private PictureBox _pbResult = new();
+        private RoundedPanel _topBar = null!;
+        private PictureBox _pbLogo = null!;
+        private Label _lbProgText = null!;
+        private ModernProgressBar _progTop = null!;
+
+        private RoundedPanel _viewportCard = null!;
+        private Panel _viewportHost = null!;
+        private RoundedPanel _panelLive = null!;
+        private RoundedPanel _panelResult = null!;
+        private PictureBox _pbLive = null!;
+        private PictureBox _pbResult = null!;
         private bool _detectedMode;
 
-        private RoundedPanel _rightCard = new();
-        private ComboBox _cbModel = new();
-        private ModernButton _btnRestartServer = new();
-        private ModernButton _btnDetect = new();
 
-        private Label _lbOk = new();
-        private Label _lbNg = new();
-        private Label _lbTotalOk = new();
-        private Label _lbTotalNg = new();
+        private RoundedPanel _rightCard = null!;
+        private ComboBox _cbModel = null!;
+        private ModernButton _btnRestartServer = null!;
+        private ModernButton _btnDetect = null!;
+        private ModernButton _btnRefresh = null!;
+        private Label _lbHistoryEmpty = null!;
 
-        private RoundedPanel _logCard = new();
-        private RichTextBox _rtbLog = new();
+        
+        private Label _lbOk = null!;
+        private Label _lbNg = null!;
+        private Label _lbTotalOk = null!;
+        private Label _lbTotalNg = null!;
 
-        private readonly ConcurrentQueue<LogItem> _logQueue = new();
-        private readonly System.Windows.Forms.Timer _logFlushTimer = new() { Interval = 80 };
-
+      
         private System.Windows.Forms.Timer? _viewAnimTimer;
         private readonly Stopwatch _viewAnimSw = new();
         private Rectangle _liveFrom, _liveTo, _resFrom, _resTo;
@@ -103,11 +111,13 @@ namespace PCB_Inspection_System
             UiPerf.EnableDoubleBuffer(this);
             UiPerf.EnableDoubleBuffer(_viewportHost);
             UiPerf.EnableDoubleBuffer(_viewportCard);
+            UiPerf.EnableDoubleBuffer(_rightCard);
 
-            _logFlushTimer.Tick += (_, __) => FlushLogBatch(maxLines: 60);
+          
+            _logFlushTimer.Tick += (_, __) => FlushLogBatch(80);
             _logFlushTimer.Start();
 
- 
+     
             KeyPreview = true;
             KeyDown += MainForm_KeyDown;
             KeyUp += MainForm_KeyUp;
@@ -133,6 +143,8 @@ namespace PCB_Inspection_System
             Resize += (_, __) => ApplyViewportLayout(animated: false);
             FormClosing += OnFormClosing;
         }
+
+   
         private async void MainForm_KeyDown(object? sender, KeyEventArgs e)
         {
             if (e.KeyCode != Keys.ControlKey) return;
@@ -156,6 +168,7 @@ namespace PCB_Inspection_System
             if (!(_lCtrlDown && _rCtrlDown))
                 _ctrlComboFired = false;
         }
+
         private void BuildUI()
         {
             SuspendLayout();
@@ -171,7 +184,7 @@ namespace PCB_Inspection_System
                 Margin = new Padding(0)
             };
             _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            _root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 380));
+            _root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420)); 
 
             _root.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
             _root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -190,8 +203,6 @@ namespace PCB_Inspection_System
         {
             _topBar = Card(Theme.Surface);
             _topBar.Padding = new Padding(16, 14, 16, 14);
-            _topBar.Margin = new Padding(0);
-
             _root.Controls.Add(_topBar, 0, 0);
             _root.SetColumnSpan(_topBar, 2);
 
@@ -201,41 +212,23 @@ namespace PCB_Inspection_System
                 ColumnCount = 3,
                 RowCount = 1,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0),
-                Padding = new Padding(0)
+                Margin = new Padding(0)
             };
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));    // logo
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // title
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 360));  // progress
-
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
             _topBar.Controls.Add(grid);
-
-          
-            var logoHost = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.Transparent,
-                Margin = new Padding(0),
-                Padding = new Padding(0)
-            };
 
             _pbLogo = new PictureBox
             {
                 Dock = DockStyle.Fill,
-                SizeMode = PictureBoxSizeMode.StretchImage,
-                BackColor = Color.Transparent,   
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.Transparent,
                 Margin = new Padding(0),
-               
+                Image = LoadLogoSafe()
             };
+            grid.Controls.Add(_pbLogo, 0, 0);
 
-            SetLogoImage(_pbLogo);
-          
-            logoHost.Controls.Add(_pbLogo);
-            grid.Controls.Add(logoHost, 0, 0);
-
-          
             var titleStack = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -248,7 +241,7 @@ namespace PCB_Inspection_System
             titleStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             titleStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
 
-            _lbTitle = new Label
+            var lbTitle = new Label
             {
                 Dock = DockStyle.Fill,
                 Text = "PCB Inspection System",
@@ -256,20 +249,17 @@ namespace PCB_Inspection_System
                 ForeColor = Theme.Text,
                 TextAlign = ContentAlignment.MiddleLeft
             };
-
-            _lbSub = new Label
+            var lbSub = new Label
             {
                 Dock = DockStyle.Fill,
                 Text = "Live Camera • AI Detect • Industrial UI",
                 ForeColor = Theme.Muted,
                 TextAlign = ContentAlignment.MiddleLeft
             };
-
-            titleStack.Controls.Add(_lbTitle, 0, 0);
-            titleStack.Controls.Add(_lbSub, 0, 1);
+            titleStack.Controls.Add(lbTitle, 0, 0);
+            titleStack.Controls.Add(lbSub, 0, 1);
             grid.Controls.Add(titleStack, 1, 0);
 
-            // ===== Progress =====
             var progWrap = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -305,18 +295,6 @@ namespace PCB_Inspection_System
             grid.Controls.Add(progWrap, 2, 0);
         }
 
-        private void SetLogoImage(PictureBox pb)
-        {
-            var img = LoadLogoSafe();
-
-            // tránh leak
-            var old = pb.Image;
-            pb.Image = img;
-            old?.Dispose();
-
-            Debug.WriteLine(img == null ? "LOGO: NULL" : $"LOGO: OK ({img.Width}x{img.Height})");
-        }
-
         private void BuildViewport()
         {
             _viewportCard = Card(Theme.Surface);
@@ -340,6 +318,7 @@ namespace PCB_Inspection_System
             _panelResult.Visible = false;
         }
 
+    
         private void BuildRightPanel()
         {
             _rightCard = Card(Theme.Surface);
@@ -355,16 +334,16 @@ namespace PCB_Inspection_System
                 Margin = new Padding(0)
             };
 
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); // model label
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 44)); // combo
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 46)); // restart
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 56)); // detect
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 210)); // summary bigger (có totals)
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 8));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));   // model label
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));   // combo
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));   // spacer
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));   // restart
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));   // spacer
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));   // detect
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));   // spacer
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));  // current
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));   // spacer
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // combined fill
 
             _rightCard.Controls.Add(grid);
 
@@ -411,125 +390,297 @@ namespace PCB_Inspection_System
             };
             _btnDetect.Click += async (_, __) => await DetectAsync();
             grid.Controls.Add(_btnDetect, 0, 5);
-            var summaryWrap = new TableLayoutPanel
+
+            // ===== CURRENT CARD =====
+            var cardCurrent = Card(Theme.Surface2);
+            cardCurrent.CornerRadius = 14;
+            cardCurrent.Padding = new Padding(12);
+            cardCurrent.Dock = DockStyle.Fill;
+
+            var curWrap = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
                 RowCount = 2,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0),
-                Padding = new Padding(0)
-            };
-            summaryWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-            summaryWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-            var cardCurrent = Card(Theme.Surface2);
-            cardCurrent.CornerRadius = 14;
-            cardCurrent.Padding = new Padding(12);
-
-            var curGrid = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 2,
-                BackColor = Color.Transparent,
                 Margin = new Padding(0)
             };
-            curGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            curGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            curGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-            curGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            curWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+            curWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            var lbCurTitle = new Label
+            curWrap.Controls.Add(new Label
             {
                 Dock = DockStyle.Fill,
                 Text = "CURRENT (This Detect)",
                 ForeColor = Theme.Muted,
                 TextAlign = ContentAlignment.MiddleLeft
-            };
-            curGrid.Controls.Add(lbCurTitle, 0, 0);
-            curGrid.SetColumnSpan(lbCurTitle, 2);
+            }, 0, 0);
 
-            _lbOk = new Label
-            {
-                Dock = DockStyle.Fill,
-                Text = "OK: 0",
-                Font = new Font("Segoe UI Semibold", 12f),
-                ForeColor = Theme.Ok,
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-
-            _lbNg = new Label
-            {
-                Dock = DockStyle.Fill,
-                Text = "NG: 0",
-                Font = new Font("Segoe UI Semibold", 12f),
-                ForeColor = Theme.Ng,
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-
-            curGrid.Controls.Add(_lbOk, 0, 1);
-            curGrid.Controls.Add(_lbNg, 1, 1);
-
-            cardCurrent.Controls.Add(curGrid);
-            var cardTotal = Card(Theme.Surface2);
-            cardTotal.CornerRadius = 14;
-            cardTotal.Padding = new Padding(12);
-
-            var totGrid = new TableLayoutPanel
+            var curStats = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
-                RowCount = 2,
+                RowCount = 1,
                 BackColor = Color.Transparent,
                 Margin = new Padding(0)
             };
-            totGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            totGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            totGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-            totGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            curStats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            curStats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
 
-            var lbTotTitle = new Label
+            var curOk = MetricChip("OK", Theme.Ok, out _lbOk);
+            var curNg = MetricChip("NG", Theme.Ng, out _lbNg);
+            curOk.Margin = new Padding(0, 0, 8, 0);
+            curNg.Margin = new Padding(8, 0, 0, 0);
+
+            curStats.Controls.Add(curOk, 0, 0);
+            curStats.Controls.Add(curNg, 1, 0);
+
+            curWrap.Controls.Add(curStats, 0, 1);
+            cardCurrent.Controls.Add(curWrap);
+            grid.Controls.Add(cardCurrent, 0, 7);
+
+        
+            var cardTotalHistory = Card(Theme.Surface2);
+            cardTotalHistory.CornerRadius = 14;
+            cardTotalHistory.Padding = new Padding(12);
+            cardTotalHistory.Dock = DockStyle.Fill;
+
+            var wrap = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 5,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));   
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));   
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 5));  
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));    
+            wrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   
+
+            var header = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+
+            header.Controls.Add(new Label
             {
                 Dock = DockStyle.Fill,
                 Text = "TOTAL (Checked Count)",
                 ForeColor = Theme.Muted,
+                Font = new Font("Segoe UI Semibold", 9.5f),
                 TextAlign = ContentAlignment.MiddleLeft
-            };
-            totGrid.Controls.Add(lbTotTitle, 0, 0);
-            totGrid.SetColumnSpan(lbTotTitle, 2);
+            }, 0, 0);
 
-            _lbTotalOk = new Label
+            _btnRefresh = new ModernButton
             {
                 Dock = DockStyle.Fill,
-                Text = "Total OK: 0",
-                Font = new Font("Segoe UI Semibold", 12f),
-                ForeColor = Theme.Ok,
-                TextAlign = ContentAlignment.MiddleLeft
+                Text = "Refresh",
+                CornerRadius = 14,
+                BackColor = Theme.Btn,
+                HoverBackColor = Theme.BtnHover,
+                PressedBackColor = Theme.BtnPressed,
+                ForeColor = Theme.Text,
+                Font = new Font("Segoe UI Semibold", 9f),
+                Height = 28,
+                Margin = new Padding(0, 3, 0, 3),
+                Padding = new Padding(0)
             };
+            _btnRefresh.Click += (_, __) => ResetTotalsAndHistory();
+            header.Controls.Add(_btnRefresh, 1, 0);
 
-            _lbTotalNg = new Label
+            var chips = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                Text = "Total NG: 0",
-                Font = new Font("Segoe UI Semibold", 12f),
-                ForeColor = Theme.Ng,
-                TextAlign = ContentAlignment.MiddleLeft
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
+            chips.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            chips.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+
+            var totOk = MetricChip("Total OK", Theme.Ok, out _lbTotalOk);
+            var totNg = MetricChip("Total NG", Theme.Ng, out _lbTotalNg);
+            totOk.Margin = new Padding(0, 0, 8, 0);
+            totNg.Margin = new Padding(8, 0, 0, 0);
+
+            chips.Controls.Add(totOk, 0, 0);
+            chips.Controls.Add(totNg, 1, 0);
+
+            var divider = new Panel { Dock = DockStyle.Fill, Height = 1, BackColor = Theme.Border, Margin = new Padding(0) };
+
+            var historyHost = new RoundedPanel
+            {
+                Dock = DockStyle.Fill,
+                FillColor = Theme.Surface,
+                BorderColor = Theme.Border,
+                BorderThickness = 1f,
+                CornerRadius = 14,
+                Padding = new Padding(6),
+                Margin = new Padding(0, 8, 0, 0)
             };
 
-            totGrid.Controls.Add(_lbTotalOk, 0, 1);
-            totGrid.Controls.Add(_lbTotalNg, 1, 1);
+            var overlay = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
 
-            cardTotal.Controls.Add(totGrid);
+            _gvHistory = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                AllowUserToResizeColumns = false,
+                MultiSelect = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                BorderStyle = BorderStyle.None,
+                BackgroundColor = Theme.Surface,
+                GridColor = Theme.Border,
+                RowHeadersVisible = false,
+                EnableHeadersVisualStyles = false,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
+            };
+            UiPerf.EnableDoubleBuffer(_gvHistory);
+            ConfigureHistoryGrid(_gvHistory);
+            _gvHistory.DataSource = _history;
 
-            summaryWrap.Controls.Add(cardCurrent, 0, 0);
-            summaryWrap.Controls.Add(cardTotal, 0, 1);
-            grid.Controls.Add(summaryWrap, 0, 7);
+            _lbHistoryEmpty = new Label
+            {
+                AutoSize = true,
+                Text = "No history yet",
+                ForeColor = Theme.Muted,
+                Font = new Font("Segoe UI", 10f),
+                BackColor = Color.Transparent
+            };
+
+            overlay.Controls.Add(_gvHistory);
+            overlay.Controls.Add(_lbHistoryEmpty);
+            _lbHistoryEmpty.BringToFront();
+
+            overlay.Resize += (_, __) => PositionHistoryEmptyLabel();
+
+            historyHost.Controls.Add(overlay);
+
+            _history.ListChanged += (_, __) => UpdateHistoryEmptyState();
+            UpdateHistoryEmptyState();
+
+            wrap.Controls.Add(header, 0, 0);
+            wrap.Controls.Add(chips, 0, 1);
+            wrap.Controls.Add(new Panel { Dock = DockStyle.Fill }, 0, 2);
+            wrap.Controls.Add(divider, 0, 3);
+            wrap.Controls.Add(historyHost, 0, 4);
+
+            cardTotalHistory.Controls.Add(wrap);
+            grid.Controls.Add(cardTotalHistory, 0, 9);
+        }
+
+        
+        private RoundedPanel MetricChip(string title, Color valueColor, out Label valueLabel)
+        {
+            var chip = new RoundedPanel
+            {
+                Dock = DockStyle.Fill,
+                FillColor = Theme.Surface,
+                BorderColor = Theme.Border,
+                BorderThickness = 1f,
+                CornerRadius = 14,
+                Padding = new Padding(12, 10, 12, 10)
+            };
+
+            var g = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
+            g.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
+            g.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            g.Controls.Add(new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = title,
+                ForeColor = Theme.Muted,
+                Font = new Font("Segoe UI Semibold", 9f),
+                TextAlign = ContentAlignment.MiddleLeft
+            }, 0, 0);
+
+            valueLabel = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "0",
+                ForeColor = valueColor,
+                Font = new Font("Segoe UI Semibold", 18f),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            g.Controls.Add(valueLabel, 0, 1);
+
+            chip.Controls.Add(g);
+            return chip;
+        }
+
+        private void UpdateHistoryEmptyState()
+        {
+            if (_lbHistoryEmpty == null) return;
+
+            _lbHistoryEmpty.Visible = _history.Count == 0;
+            if (_lbHistoryEmpty.Visible)
+                PositionHistoryEmptyLabel();
+        }
+
+        private void PositionHistoryEmptyLabel()
+        {
+            if (_lbHistoryEmpty == null || _gvHistory == null) return;
+            var host = _gvHistory.Parent;
+            if (host == null) return;
+
+            int headerH = _gvHistory.ColumnHeadersVisible ? _gvHistory.ColumnHeadersHeight : 0;
+
+            int x = Math.Max(0, (host.ClientSize.Width - _lbHistoryEmpty.Width) / 2);
+            int y = headerH + Math.Max(0, (host.ClientSize.Height - headerH - _lbHistoryEmpty.Height) / 2);
+
+            _lbHistoryEmpty.Location = new Point(x, y);
+        }
+
+        private void ResetTotalsAndHistory()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(ResetTotalsAndHistory));
+                return;
+            }
+
+            _totalOk = 0;
+            _totalNg = 0;
+
+            if (_lbTotalOk != null) _lbTotalOk.Text = "0";
+            if (_lbTotalNg != null) _lbTotalNg.Text = "0";
+
+            _history.Clear();
+            UpdateHistoryEmptyState();
+
+            LogInfo("Refresh: cleared TOTAL + HISTORY.");
         }
 
         private void BuildLogPanel()
         {
             _logCard = Card(Theme.Surface);
             _logCard.Padding = new Padding(12);
+
             _root.Controls.Add(_logCard, 0, 2);
             _root.SetColumnSpan(_logCard, 2);
 
@@ -573,7 +724,6 @@ namespace PCB_Inspection_System
                 CornerRadius = 16,
                 BorderThickness = 1f,
                 Padding = new Padding(10),
-
                 Dock = DockStyle.None,
                 Anchor = AnchorStyles.Top | AnchorStyles.Left,
                 Margin = new Padding(0)
@@ -622,6 +772,7 @@ namespace PCB_Inspection_System
             Dock = DockStyle.Fill
         };
 
+
         private void ApplyViewportLayout(bool animated)
         {
             var bounds = _viewportHost.ClientRectangle;
@@ -664,13 +815,10 @@ namespace PCB_Inspection_System
                 _panelResult.RefreshRegionNow();
                 return;
             }
+
             _panelResult.Visible = true;
 
-            StartViewportAnimation(
-                liveTo: liveTarget,
-                resTo: resTarget,
-                hideResultAfter: !_detectedMode
-            );
+            StartViewportAnimation(liveTarget, resTarget, hideResultAfter: !_detectedMode);
         }
 
         private void EnterDetectedMode()
@@ -691,21 +839,19 @@ namespace PCB_Inspection_System
             StopViewportAnimation();
 
             _hideResultAfterAnim = hideResultAfter;
-
             _liveFrom = _panelLive.Bounds;
             _resFrom = _panelResult.Bounds;
-
             _liveTo = liveTo;
             _resTo = resTo;
+
             _panelLive.SuppressRegionUpdate = true;
             _panelResult.SuppressRegionUpdate = true;
 
             _viewAnimSw.Restart();
-            _viewAnimTimer = new System.Windows.Forms.Timer { Interval = 16 }; // ~60fps
+            _viewAnimTimer = new System.Windows.Forms.Timer { Interval = 16 };
             _viewAnimTimer.Tick += (_, __) =>
             {
                 const int durationMs = 240;
-
                 float t = (float)_viewAnimSw.ElapsedMilliseconds / durationMs;
                 if (t >= 1f) t = 1f;
 
@@ -722,6 +868,7 @@ namespace PCB_Inspection_System
 
                     if (_hideResultAfterAnim)
                         _panelResult.Visible = false;
+
                     _panelLive.SuppressRegionUpdate = false;
                     _panelResult.SuppressRegionUpdate = false;
                     _panelLive.RefreshRegionNow();
@@ -751,6 +898,7 @@ namespace PCB_Inspection_System
             int h = a.Height + (int)Math.Round((b.Height - a.Height) * t);
             return new Rectangle(x, y, w, h);
         }
+
         private void StartCamera()
         {
             try
@@ -788,42 +936,64 @@ namespace PCB_Inspection_System
 
         private void VideoSource_NewFrame(object sender, NewFrameEventArgs e)
         {
-            Bitmap frame = (Bitmap)e.Frame.Clone();
-
-            lock (_frameLock)
-            {
-                _currentFrame?.Dispose();
-                _currentFrame = frame;
-            }
-
-            _displayFrameCounter++;
-            if (_displayFrameCounter % 3 != 0) return;
-
-            Bitmap displayFrame = new Bitmap(640, 480);
-            using (Graphics g = Graphics.FromImage(displayFrame))
-            {
-                g.InterpolationMode = InterpolationMode.Low;
-                g.DrawImage(frame, 0, 0, 640, 480);
-            }
-
-            if (_isClosing || _pbLive.IsDisposed || !_pbLive.IsHandleCreated)
-            {
-                displayFrame.Dispose();
-                return;
-            }
+            Bitmap? raw = null;
+            Bitmap? storeCopy = null;
+            Bitmap? displayFrame = null;
 
             try
             {
+                raw = (Bitmap)e.Frame.Clone();
+                storeCopy = (Bitmap)raw.Clone();
+
+                lock (_frameLock)
+                {
+                    var old = _currentFrame;
+                    _currentFrame = storeCopy;
+                    storeCopy = null;
+                    old?.Dispose();
+                }
+
+                _displayFrameCounter++;
+                if (_displayFrameCounter % 3 != 0) return;
+
+                displayFrame = new Bitmap(640, 480, PixelFormat.Format24bppRgb);
+                using (var g = Graphics.FromImage(displayFrame))
+                {
+                    g.InterpolationMode = InterpolationMode.Low;
+                    g.DrawImage(raw, 0, 0, 640, 480);
+                }
+
+                if (_isClosing || _pbLive.IsDisposed || !_pbLive.IsHandleCreated)
+                {
+                    displayFrame.Dispose();
+                    displayFrame = null;
+                    return;
+                }
+
                 _pbLive.BeginInvoke(new Action(() =>
                 {
-                    if (_pbLive.IsDisposed) { displayFrame.Dispose(); return; }
-                    _pbLive.Image?.Dispose();
+                    if (_pbLive.IsDisposed)
+                    {
+                        displayFrame?.Dispose();
+                        return;
+                    }
+
+                    var oldImg = _pbLive.Image;
                     _pbLive.Image = displayFrame;
+                    displayFrame = null;
+                    oldImg?.Dispose();
                 }));
             }
-            catch
+            catch (Exception ex)
             {
-                displayFrame.Dispose();
+                LogError("NewFrame error: " + ex.Message);
+                displayFrame?.Dispose();
+                storeCopy?.Dispose();
+            }
+            finally
+            {
+                raw?.Dispose();
+                storeCopy?.Dispose();
             }
         }
 
@@ -834,7 +1004,6 @@ namespace PCB_Inspection_System
                 if (_videoSource != null)
                 {
                     _videoSource.NewFrame -= VideoSource_NewFrame;
-
                     if (_videoSource.IsRunning)
                     {
                         _videoSource.SignalToStop();
@@ -842,100 +1011,22 @@ namespace PCB_Inspection_System
                     }
                     _videoSource = null;
                 }
-            }
-            catch { }
-        }
 
-        private async Task RestartServerAsync()
-        {
-            try
-            {
-                DisableRightControls(true);
+                lock (_frameLock)
+                {
+                    _currentFrame?.Dispose();
+                    _currentFrame = null;
+                }
 
-                SetTopProgress("Starting AI server...", indeterminate: true);
-                LogInfo("Restart AI server...");
+                _pbLive.Image?.Dispose();
+                _pbLive.Image = null;
 
-                await StartPythonServerAsync();
-
-                SetTopProgress("AI server ready", indeterminate: false, value: 0);
-                LogOk("AI server ready.");
+                LogInfo("Camera stopped.");
             }
             catch (Exception ex)
             {
-                SetTopProgress("AI server error", indeterminate: false, value: 0);
-                LogError(ex.Message);
+                LogError("StopCamera error: " + ex.Message);
             }
-            finally
-            {
-                DisableRightControls(false);
-            }
-        }
-
-        private async Task StartPythonServerAsync()
-        {
-            StopPythonServer();
-
-            string workDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "AI_Server");
-            string scriptPath = Path.Combine(workDir, "server.py");
-
-            if (!File.Exists(scriptPath))
-                throw new FileNotFoundException("Không tìm thấy server.py", scriptPath);
-
-            string pyLauncher = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "py.exe");
-            if (!File.Exists(pyLauncher)) pyLauncher = "python";
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = pyLauncher,
-                WorkingDirectory = workDir,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-           // psi.ArgumentList.Add("-3.11");
-            psi.ArgumentList.Add(scriptPath);
-
-            _pythonProcess = new Process { StartInfo = psi, EnableRaisingEvents = true };
-
-            _pythonProcess.OutputDataReceived += (_, e) =>
-            {
-                if (!string.IsNullOrWhiteSpace(e.Data)) LogInfo("[PY] " + e.Data);
-            };
-            _pythonProcess.ErrorDataReceived += (_, e) =>
-            {
-                if (!string.IsNullOrWhiteSpace(e.Data)) LogError("[PY-ERR] " + e.Data);
-            };
-
-            if (!_pythonProcess.Start())
-                throw new InvalidOperationException("Không start được Python process.");
-
-            _pythonProcess.BeginOutputReadLine();
-            _pythonProcess.BeginErrorReadLine();
-
-            await WaitForServerAsync("http://127.0.0.1:8000/docs", timeoutMs: 8000);
-        }
-
-        private static async Task WaitForServerAsync(string url, int timeoutMs)
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(1000) };
-            var sw = Stopwatch.StartNew();
-
-            while (sw.ElapsedMilliseconds < timeoutMs)
-            {
-                try
-                {
-                    using var resp = await http.GetAsync(url);
-                    if ((int)resp.StatusCode >= 200 && (int)resp.StatusCode < 500)
-                        return;
-                }
-                catch { }
-
-                await Task.Delay(300);
-            }
-
-            throw new TimeoutException("Python server chưa khởi động kịp trong thời gian cho phép.");
         }
 
         private void StopPythonServer()
@@ -946,31 +1037,90 @@ namespace PCB_Inspection_System
                 {
                     _pythonProcess.Kill(true);
                     _pythonProcess.Dispose();
-                    _pythonProcess = null;
                 }
             }
             catch { }
+            finally
+            {
+                _pythonProcess = null;
+            }
         }
+
+        private async Task RestartServerAsync()
+        {
+            try
+            {
+                DisableRightControls(true);
+
+                SetTopProgress("Restarting server...", indeterminate: true);
+                LogInfo("Restart AI server...");
+
+                StopPythonServer();
+
+                var app = AppDomain.CurrentDomain.BaseDirectory;
+                var serverPy = Path.Combine(app, "AI_Server", "server.py");
+                var pythonExe = "py";
+
+                if (!File.Exists(serverPy))
+                {
+                    LogError("Không thấy AI_Server/server.py");
+                    SetTopProgress("server.py missing", indeterminate: false, value: 0);
+                    return;
+                }
+
+                _pythonProcess = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = pythonExe,
+                        Arguments = $"-3.11 \"{serverPy}\"",
+                        WorkingDirectory = Path.GetDirectoryName(serverPy),
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+                _pythonProcess.Start();
+
+                await Task.Delay(1500);
+
+                SetTopProgress("Server ready", indeterminate: false, value: 0);
+                LogOk("Server restarted.");
+            }
+            catch (Exception ex)
+            {
+                SetTopProgress("Restart error", indeterminate: false, value: 0);
+                LogError("RestartServer error: " + ex.Message);
+            }
+            finally
+            {
+                DisableRightControls(false);
+            }
+        }
+
         private void LoadModels()
         {
             try
             {
-                string dataPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
-                if (!Directory.Exists(dataPath))
+                var app = AppDomain.CurrentDomain.BaseDirectory;
+                var dataDir = Path.Combine(app, "Data");
+                if (!Directory.Exists(dataDir))
                 {
-                    LogError("Không tìm thấy thư mục Data!");
+                    LogError("Không thấy folder Data.");
                     return;
                 }
 
-                var names = Directory.GetDirectories(dataPath)
-                                     .Select(Path.GetFileName)
-                                     .Where(x => !string.IsNullOrWhiteSpace(x))
-                                     .ToList();
+                var folders = Directory.GetDirectories(dataDir)
+                    .Select(Path.GetFileName)
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .ToArray();
 
-                _cbModel.DataSource = names;
-                if (names.Count > 0) _cbModel.SelectedIndex = 0;
+                _cbModel.Items.Clear();
+                _cbModel.Items.AddRange(folders);
 
-                LogOk($"Loaded {names.Count} model folders.");
+                if (_cbModel.Items.Count > 0)
+                    _cbModel.SelectedIndex = 0;
+
+                LogInfo($"Loaded models: {folders.Length}");
             }
             catch (Exception ex)
             {
@@ -1023,6 +1173,7 @@ namespace PCB_Inspection_System
             }
         }
 
+    
         private async Task DetectAsync()
         {
             if (_isDetecting)
@@ -1035,7 +1186,7 @@ namespace PCB_Inspection_System
             lock (_frameLock)
             {
                 if (_currentFrame != null)
-                    safeFrame = (Bitmap)_currentFrame.Clone();
+                    safeFrame = CopyBitmap(_currentFrame);
             }
 
             if (safeFrame == null)
@@ -1046,13 +1197,17 @@ namespace PCB_Inspection_System
 
             DisableRightControls(true);
 
+            var modelName = _cbModel.SelectedItem?.ToString() ?? "-";
+            var ts = DateTime.Now;
+            var sw = Stopwatch.StartNew();
+
             try
             {
                 _isDetecting = true;
 
                 EnterDetectedMode();
                 SetTopProgress("Detecting...", indeterminate: true);
-                LogInfo("Detect started...");
+                LogInfo($"Detect started. Model={modelName}");
 
                 var result = await DetectFromBitmapAsync(safeFrame);
 
@@ -1063,17 +1218,27 @@ namespace PCB_Inspection_System
                     return;
                 }
 
-       
-                _lbOk.Text = $"OK: {result.ok_count}";
-                _lbNg.Text = $"NG: {result.ng_count}";
+            
+                _lbOk.Text = result.ok_count.ToString();
+                _lbNg.Text = result.ng_count.ToString();
 
                 _totalOk += result.ok_count;
                 _totalNg += result.ng_count;
-                _lbTotalOk.Text = $"Total OK: {_totalOk}";
-                _lbTotalNg.Text = $"Total NG: {_totalNg}";
+                _lbTotalOk.Text = _totalOk.ToString();
+                _lbTotalNg.Text = _totalNg.ToString();
+
+                sw.Stop();
+
+                AddHistoryRow(new DetectHistoryRow
+                {
+                    Timestamp = ts,
+                    Model = modelName,
+                    OK = result.ok_count,
+                    NG = result.ng_count,
+                });
 
                 SetTopProgress($"Done • OK {result.ok_count} • NG {result.ng_count}", indeterminate: false, value: 100);
-                LogOk($"Detect done. OK={result.ok_count}, NG={result.ng_count} | TotalOK={_totalOk}, TotalNG={_totalNg}");
+                LogOk($"Detect done. Model={modelName} OK={result.ok_count} NG={result.ng_count} ({sw.ElapsedMilliseconds} ms)");
             }
             catch (Exception ex)
             {
@@ -1086,6 +1251,30 @@ namespace PCB_Inspection_System
                 DisableRightControls(false);
                 safeFrame.Dispose();
             }
+        }
+
+        private void AddHistoryRow(DetectHistoryRow row)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => AddHistoryRow(row)));
+                return;
+            }
+
+            _history.Insert(0, row);
+
+            if (_history.Count > 500)
+                _history.RemoveAt(_history.Count - 1);
+
+            UpdateHistoryEmptyState();
+        }
+
+        private static Bitmap CopyBitmap(Bitmap src)
+        {
+            var dst = new Bitmap(src.Width, src.Height, PixelFormat.Format24bppRgb);
+            using var g = Graphics.FromImage(dst);
+            g.DrawImage(src, 0, 0, src.Width, src.Height);
+            return dst;
         }
 
         private async Task<DetectResult?> DetectFromBitmapAsync(Bitmap frame)
@@ -1117,8 +1306,10 @@ namespace PCB_Inspection_System
             byte[] bytes = Convert.FromBase64String(result.image_base64);
             using var ms2 = new MemoryStream(bytes);
 
-            _pbResult.Image?.Dispose();
-            _pbResult.Image = new Bitmap(ms2);
+            using var tmp = new Bitmap(ms2);
+            var oldImg = _pbResult.Image;
+            _pbResult.Image = new Bitmap(tmp); // ✅ clone
+            oldImg?.Dispose();
 
             return result;
         }
@@ -1134,24 +1325,7 @@ namespace PCB_Inspection_System
             _btnDetect.Enabled = !busy;
             _btnRestartServer.Enabled = !busy;
             _cbModel.Enabled = !busy;
-        }
-
-        private async void OnFormClosing(object? sender, FormClosingEventArgs e)
-        {
-            _isClosing = true;
-
-            StopViewportAnimation();
-            _logFlushTimer.Stop();
-
-            StopCamera();
-            StopPythonServer();
-
-            try
-            {
-                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-                await client.PostAsync("http://127.0.0.1:8000/shutdown", null);
-            }
-            catch { }
+            if (_btnRefresh != null) _btnRefresh.Enabled = !busy;
         }
 
         private void SetTopProgress(string text, bool indeterminate, int value = 0)
@@ -1178,9 +1352,7 @@ namespace PCB_Inspection_System
 
         private void FlushLogBatch(int maxLines)
         {
-            if (_rtbLog.IsDisposed) return;
-            if (!_rtbLog.IsHandleCreated) return;
-
+            if (_rtbLog.IsDisposed || !_rtbLog.IsHandleCreated) return;
             if (_logQueue.IsEmpty) return;
 
             if (InvokeRequired)
@@ -1200,21 +1372,165 @@ namespace PCB_Inspection_System
                 _rtbLog.SelectionColor = Theme.Text;
                 count++;
             }
-
             _rtbLog.ScrollToCaret();
         }
 
-        private Image LoadLogoSafe()
-        {
-            var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mcnex", "Logo.png");
-            if (!File.Exists(path)) return new Bitmap(1, 1);
+        private readonly record struct LogItem(string Tag, string Message, Color Color);
 
-   
-            using var bmpTemp = new Bitmap(path);
-            return new Bitmap(bmpTemp);
+        private async void OnFormClosing(object? sender, FormClosingEventArgs e)
+        {
+            _isClosing = true;
+
+            StopViewportAnimation();
+            _logFlushTimer.Stop();
+
+            StopCamera();
+            StopPythonServer();
+
+            try
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+                await client.PostAsync("http://127.0.0.1:8000/shutdown", null);
+            }
+            catch { }
         }
 
-        private readonly record struct LogItem(string Tag, string Message, Color Color);
+        private Image? LoadLogoSafe()
+        {
+            try
+            {
+                var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mcnex", "Logo.png");
+                if (!File.Exists(path)) return null;
+
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var ms = new MemoryStream();
+                fs.CopyTo(ms);
+                ms.Position = 0;
+
+                using var img = Image.FromStream(ms);
+                return (Image)img.Clone();
+            }
+            catch { return null; }
+        }
+
+        public sealed class DetectResult
+        {
+            public int ok_count { get; set; }
+            public int ng_count { get; set; }
+            public string image_base64 { get; set; } = "";
+        }
+
+        public sealed class DetectHistoryRow
+        {
+            public DateTime Timestamp { get; set; }
+            public string Model { get; set; } = "";
+            public int OK { get; set; }
+            public int NG { get; set; }
+        }
+
+        private void ConfigureHistoryGrid(DataGridView gv)
+        {
+            gv.SuspendLayout();
+
+            gv.AutoGenerateColumns = false;
+            gv.Columns.Clear();
+
+            gv.ReadOnly = true;
+            gv.AllowUserToAddRows = false;
+            gv.AllowUserToDeleteRows = false;
+            gv.AllowUserToResizeRows = false;
+            gv.AllowUserToResizeColumns = false;
+            gv.MultiSelect = false;
+            gv.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+
+            gv.RowHeadersVisible = false;
+            gv.BorderStyle = BorderStyle.None;
+            gv.BackgroundColor = Theme.Surface;
+
+            gv.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            gv.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+            gv.GridColor = Theme.Border;
+
+            gv.EnableHeadersVisualStyles = false;
+            gv.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            gv.ColumnHeadersHeight = 30;
+
+            gv.RowTemplate.Height = 30;
+            gv.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+
+            gv.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Theme.Track,
+                ForeColor = Theme.Text,
+                Font = new Font("Segoe UI Semibold", 9.5f),
+                Alignment = DataGridViewContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 0, 8, 0),
+                WrapMode = DataGridViewTriState.False
+            };
+
+            gv.DefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Theme.Surface,
+                ForeColor = Theme.Text,
+                Font = new Font("Segoe UI", 9.5f),
+                SelectionBackColor = Color.FromArgb(220, 235, 255),
+                SelectionForeColor = Theme.Text,
+                Padding = new Padding(8, 0, 8, 0),
+                WrapMode = DataGridViewTriState.False
+            };
+
+            gv.AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Color.FromArgb(244, 246, 250),
+                ForeColor = Theme.Text,
+                SelectionBackColor = Color.FromArgb(220, 235, 255),
+                SelectionForeColor = Theme.Text,
+                Padding = new Padding(8, 0, 8, 0)
+            };
+
+            gv.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = nameof(DetectHistoryRow.Timestamp),
+                HeaderText = "Time",
+                FillWeight = 42,
+                DefaultCellStyle = new DataGridViewCellStyle { Format = "HH:mm:ss", Padding = new Padding(8, 0, 8, 0) }
+            });
+
+            gv.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = nameof(DetectHistoryRow.Model),
+                HeaderText = "Model",
+                FillWeight = 30
+            });
+
+            gv.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = nameof(DetectHistoryRow.OK),
+                HeaderText = "OK",
+                FillWeight = 14,
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    ForeColor = Theme.Ok,
+                    Alignment = DataGridViewContentAlignment.MiddleLeft,
+                    Padding = new Padding(8, 0, 8, 0)
+                }
+            });
+
+            gv.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = nameof(DetectHistoryRow.NG),
+                HeaderText = "NG",
+                FillWeight = 14,
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    ForeColor = Theme.Ng,
+                    Alignment = DataGridViewContentAlignment.MiddleLeft,
+                    Padding = new Padding(8, 0, 8, 0)
+                }
+            });
+
+            gv.ResumeLayout();
+        }
 
         private static class Theme
         {
@@ -1260,24 +1576,22 @@ namespace PCB_Inspection_System
                     typeof(Control)
                         .GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic)
                         ?.SetValue(c, true, null);
+
                     typeof(Control)
                         .GetMethod("SetStyle", BindingFlags.Instance | BindingFlags.NonPublic)
                         ?.Invoke(c, new object[]
                         {
-                    ControlStyles.AllPaintingInWmPaint |
-                    ControlStyles.UserPaint |
-                    ControlStyles.OptimizedDoubleBuffer,
-                    true
+                            ControlStyles.AllPaintingInWmPaint |
+                            ControlStyles.UserPaint |
+                            ControlStyles.OptimizedDoubleBuffer,
+                            true
                         });
 
                     typeof(Control)
                         .GetMethod("UpdateStyles", BindingFlags.Instance | BindingFlags.NonPublic)
                         ?.Invoke(c, null);
                 }
-                catch
-                {
-                    
-                }
+                catch { }
             }
         }
 
@@ -1303,7 +1617,6 @@ namespace PCB_Inspection_System
             protected override void OnSizeChanged(EventArgs e)
             {
                 base.OnSizeChanged(e);
-
                 if (SuppressRegionUpdate) return;
                 RefreshRegionNow();
             }
@@ -1316,10 +1629,8 @@ namespace PCB_Inspection_System
                 if (rect == _cachedRect && _cachedPath != null) return;
 
                 _cachedRect = rect;
-
                 _cachedPath?.Dispose();
                 _cachedPath = RoundRect(new Rectangle(0, 0, Width, Height), CornerRadius);
-
                 Region = new Region(_cachedPath);
                 Invalidate();
             }
@@ -1533,36 +1844,6 @@ namespace PCB_Inspection_System
                 path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
                 path.CloseFigure();
                 return path;
-            }
-        }
-
-        public sealed class DetectResult
-        {
-            public int ok_count { get; set; }
-            public int ng_count { get; set; }
-            public string image_base64 { get; set; } = "";
-        }
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-
-            this.Icon = AppIconProvider.Get(); 
-            this.ShowInTaskbar = true;
-            this.ShowIcon = true;
-            this.ControlBox = true;
-        }
-        static class AppIconProvider
-        {
-            private static Icon? _icon;
-
-            public static Icon Get()
-            {
-                if (_icon != null) return _icon;
-
-        
-                var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mcnex", "Icon.ico");
-                _icon = File.Exists(path) ? new Icon(path) : SystemIcons.Application;
-                return _icon;
             }
         }
     }
