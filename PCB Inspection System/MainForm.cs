@@ -20,7 +20,6 @@ namespace PCB_Inspection_System
 {
     public partial class MainForm : Form
     {
-
         private Process? _pythonProcess;
         private FilterInfoCollection? _videoDevices;
         private VideoCaptureDevice? _videoSource;
@@ -33,8 +32,8 @@ namespace PCB_Inspection_System
 
         private static readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
 
-        private long _totalOk = 0;
-        private long _totalNg = 0;
+        private long _totalOk;
+        private long _totalNg;
 
         private readonly BindingList<DetectHistoryRow> _history = new();
         private DataGridView _gvHistory = null!;
@@ -47,14 +46,12 @@ namespace PCB_Inspection_System
         private const int VK_LCONTROL = 0xA2;
         private const int VK_RCONTROL = 0xA3;
 
-        [DllImport("user32.dll")]
-        private static extern short GetAsyncKeyState(int vKey);
-
-        private void UpdateCtrlStates()
-        {
-            _lCtrlDown = (GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0;
-            _rCtrlDown = (GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0;
-        }
+        private Panel _shell = null!;
+        private Panel _titleBar = null!;
+        private Label _lbWindowTitle = null!;
+        private ModernButton _btnWinMin = null!;
+        private ModernButton _btnWinMax = null!;
+        private ModernButton _btnWinClose = null!;
 
         private TableLayoutPanel _root = null!;
 
@@ -71,7 +68,6 @@ namespace PCB_Inspection_System
         private PictureBox _pbResult = null!;
         private bool _detectedMode;
 
-
         private RoundedPanel _rightCard = null!;
         private ComboBox _cbModel = null!;
         private ModernButton _btnRestartServer = null!;
@@ -79,53 +75,74 @@ namespace PCB_Inspection_System
         private ModernButton _btnRefresh = null!;
         private Label _lbHistoryEmpty = null!;
 
-        
         private Label _lbOk = null!;
         private Label _lbNg = null!;
         private Label _lbTotalOk = null!;
         private Label _lbTotalNg = null!;
 
-      
         private System.Windows.Forms.Timer? _viewAnimTimer;
         private readonly Stopwatch _viewAnimSw = new();
         private Rectangle _liveFrom, _liveTo, _resFrom, _resTo;
         private bool _hideResultAfterAnim;
 
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
+
+        private const int WM_NCLBUTTONDOWN = 0xA1;
+        private const int HTCAPTION = 0x2;
+
         public MainForm()
         {
             Text = "PCB_Inspection";
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(1200, 720);
+            MinimumSize = new Size(1280, 760);
 
-            BackColor = Theme.Bg;
+            FormBorderStyle = FormBorderStyle.None;
+            ControlBox = false;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            DoubleBuffered = true;
+            KeyPreview = true;
+
+            BackColor = Theme.AppBorder;
             ForeColor = Theme.Text;
             Font = new Font("Segoe UI", 10f);
 
             WindowState = FormWindowState.Maximized;
             MaximizedBounds = Screen.FromControl(this).WorkingArea;
 
-            DoubleBuffered = true;
-
             BuildUI();
 
             UiPerf.EnableDoubleBuffer(this);
+            UiPerf.EnableDoubleBuffer(_shell);
+            UiPerf.EnableDoubleBuffer(_root);
             UiPerf.EnableDoubleBuffer(_viewportHost);
             UiPerf.EnableDoubleBuffer(_viewportCard);
             UiPerf.EnableDoubleBuffer(_rightCard);
 
-          
             _logFlushTimer.Tick += (_, __) => FlushLogBatch(80);
             _logFlushTimer.Start();
 
-     
-            KeyPreview = true;
             KeyDown += MainForm_KeyDown;
             KeyUp += MainForm_KeyUp;
+            Resize += (_, __) =>
+            {
+                ApplyViewportLayout(animated: false);
+                UpdateWindowButtons();
+            };
+            FormClosing += OnFormClosing;
 
             Shown += async (_, __) =>
             {
                 WindowState = FormWindowState.Maximized;
                 MaximizedBounds = Screen.FromControl(this).WorkingArea;
+                UpdateWindowButtons();
 
                 _detectedMode = false;
                 ApplyViewportLayout(animated: false);
@@ -139,160 +156,108 @@ namespace PCB_Inspection_System
                 await RestartServerAsync();
                 SetTopProgress("Ready", indeterminate: false, value: 0);
             };
-
-            Resize += (_, __) => ApplyViewportLayout(animated: false);
-            FormClosing += OnFormClosing;
         }
-
-   
-        private async void MainForm_KeyDown(object? sender, KeyEventArgs e)
+        private void MainForm_KeyDown(object? sender, KeyEventArgs e)
         {
             if (e.KeyCode != Keys.ControlKey) return;
-
             UpdateCtrlStates();
             if (_lCtrlDown && _rCtrlDown && !_ctrlComboFired)
             {
                 _ctrlComboFired = true;
                 e.Handled = true;
-
-                if (!_isDetecting)
-                    await DetectAsync();
+                _ = RunDetectShortcutAsync();
             }
+        }
+
+        private void WireDragMove(Control c)
+        {
+            c.MouseDown += (_, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                ReleaseCapture();
+                SendMessage(Handle, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            };
+
+            c.DoubleClick += (_, __) => ToggleMaximize();
+        }
+
+        private async Task RunDetectShortcutAsync()
+        {
+            if (!_isDetecting)
+                await DetectAsync();
         }
 
         private void MainForm_KeyUp(object? sender, KeyEventArgs e)
         {
             if (e.KeyCode != Keys.ControlKey) return;
-
             UpdateCtrlStates();
             if (!(_lCtrlDown && _rCtrlDown))
                 _ctrlComboFired = false;
         }
 
+        private void UpdateCtrlStates()
+        {
+            _lCtrlDown = (GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0;
+            _rCtrlDown = (GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0;
+        }
         private void BuildUI()
         {
             SuspendLayout();
             Controls.Clear();
 
+            _shell = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Theme.Bg,
+                Padding = new Padding(1)
+            };
+            Controls.Add(_shell);
+
+            BuildWindowChrome();
+            BuildContent();
+
+            ResumeLayout(true);
+        }
+
+        private void BuildWindowChrome()
+        {
+            _titleBar = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 0,
+                BackColor = Theme.WindowEdge,
+                Padding = new Padding(0),
+                Visible = false
+            };
+            _shell.Controls.Add(_titleBar);
+        }
+
+        private void BuildContent()
+        {
             _root = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 BackColor = Theme.Bg,
-                Padding = new Padding(16),
+                Padding = new Padding(16, 12, 16, 14),
                 ColumnCount = 2,
                 RowCount = 3,
                 Margin = new Padding(0)
             };
-            _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            _root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420)); 
-
-            _root.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
-            _root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            _root.RowStyles.Add(new RowStyle(SizeType.Absolute, 230));
-            Controls.Add(_root);
+            _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            _root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 360f));
+            _root.RowStyles.Add(new RowStyle(SizeType.Absolute, 78f));
+            _root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            _root.RowStyles.Add(new RowStyle(SizeType.Absolute, 120f));
+            _shell.Controls.Add(_root);
+            _root.BringToFront();
 
             BuildTopBar();
             BuildViewport();
             BuildRightPanel();
             BuildLogPanel();
 
-            ResumeLayout();
-        }
-
-        private void BuildTopBar()
-        {
-            _topBar = Card(Theme.Surface);
-            _topBar.Padding = new Padding(16, 14, 16, 14);
-            _root.Controls.Add(_topBar, 0, 0);
-            _root.SetColumnSpan(_topBar, 2);
-
-            var grid = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 3,
-                RowCount = 1,
-                BackColor = Color.Transparent,
-                Margin = new Padding(0)
-            };
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
-            _topBar.Controls.Add(grid);
-
-            _pbLogo = new PictureBox
-            {
-                Dock = DockStyle.Fill,
-                SizeMode = PictureBoxSizeMode.Zoom,
-                BackColor = Color.Transparent,
-                Margin = new Padding(0),
-                Image = LoadLogoSafe()
-            };
-            grid.Controls.Add(_pbLogo, 0, 0);
-
-            var titleStack = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                RowCount = 2,
-                ColumnCount = 1,
-                BackColor = Color.Transparent,
-                Padding = new Padding(10, 2, 6, 0),
-                Margin = new Padding(0)
-            };
-            titleStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-            titleStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-
-            var lbTitle = new Label
-            {
-                Dock = DockStyle.Fill,
-                Text = "PCB Inspection System",
-                Font = new Font("Segoe UI Semibold", 16f),
-                ForeColor = Theme.Text,
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-            var lbSub = new Label
-            {
-                Dock = DockStyle.Fill,
-                Text = "Live Camera • AI Detect • Industrial UI",
-                ForeColor = Theme.Muted,
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-            titleStack.Controls.Add(lbTitle, 0, 0);
-            titleStack.Controls.Add(lbSub, 0, 1);
-            grid.Controls.Add(titleStack, 1, 0);
-
-            var progWrap = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                RowCount = 2,
-                ColumnCount = 1,
-                BackColor = Color.Transparent,
-                Padding = new Padding(8, 4, 8, 0),
-                Margin = new Padding(0)
-            };
-            progWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-            progWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
-
-            _lbProgText = new Label
-            {
-                Dock = DockStyle.Fill,
-                Text = "Idle",
-                ForeColor = Theme.Muted,
-                TextAlign = ContentAlignment.MiddleRight
-            };
-
-            _progTop = new ModernProgressBar
-            {
-                Dock = DockStyle.Fill,
-                Height = 10,
-                CornerRadius = 6,
-                TrackColor = Theme.Track,
-                ProgressColor = Theme.Accent,
-                Margin = new Padding(0, 2, 0, 0)
-            };
-
-            progWrap.Controls.Add(_lbProgText, 0, 0);
-            progWrap.Controls.Add(_progTop, 0, 1);
-            grid.Controls.Add(progWrap, 2, 0);
+            _root.Resize += (_, __) => UpdateResponsiveLayout();
+            UpdateResponsiveLayout();
         }
 
         private void BuildViewport()
@@ -309,20 +274,353 @@ namespace PCB_Inspection_System
             };
             _viewportCard.Controls.Add(_viewportHost);
 
-            _panelResult = ViewportPanel("RESULT (After Detect)", "Zoom • Pan (tuỳ bạn thêm)", out _pbResult);
+            _panelResult = ViewportPanel("RESULT", "AI annotated image", out _pbResult);
             _panelLive = ViewportPanel("LIVE CAMERA", "Realtime stream", out _pbLive);
 
             _viewportHost.Controls.Add(_panelResult);
             _viewportHost.Controls.Add(_panelLive);
-
             _panelResult.Visible = false;
         }
+        private RoundedPanel ViewportPanel(string title, string subtitle, out PictureBox pictureBox)
+        {
+            var card = new RoundedPanel
+            {
+                Dock = DockStyle.None,
+                FillColor = Theme.Surface2,
+                BorderColor = Theme.Border,
+                BorderThickness = 1f,
+                CornerRadius = 18,
+                Padding = new Padding(12),
+                Margin = new Padding(0)
+            };
 
-    
+            var root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            var header = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            var lbTitle = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = title,
+                ForeColor = Theme.Text,
+                Font = new Font("Segoe UI Semibold", 10f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true,
+                Margin = new Padding(0)
+            };
+
+            var lbSub = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = subtitle,
+                ForeColor = Theme.Muted,
+                Font = new Font("Segoe UI", 8.5f),
+                TextAlign = ContentAlignment.MiddleRight,
+                AutoEllipsis = true,
+                Margin = new Padding(0)
+            };
+
+            header.Controls.Add(lbTitle, 0, 0);
+            header.Controls.Add(lbSub, 1, 0);
+
+            var frame = new RoundedPanel
+            {
+                Dock = DockStyle.Fill,
+                FillColor = Theme.Surface,
+                BorderColor = Theme.Border,
+                BorderThickness = 1f,
+                CornerRadius = 14,
+                Padding = new Padding(0),
+                Margin = new Padding(0)
+            };
+
+            pictureBox = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Theme.Surface,
+                SizeMode = PictureBoxSizeMode.Zoom,
+                Margin = new Padding(0)
+            };
+
+            frame.Controls.Add(pictureBox);
+
+            root.Controls.Add(header, 0, 0);
+            root.Controls.Add(frame, 0, 1);
+            card.Controls.Add(root);
+
+            return card;
+        }
+
+        private void BuildTopBar()
+        {
+            _topBar = Card(Theme.Surface);
+            _topBar.CornerRadius = 18;
+            _topBar.Padding = new Padding(16, 12, 16, 12);
+            _topBar.Margin = new Padding(0);
+            _root.Controls.Add(_topBar, 0, 0);
+            _root.SetColumnSpan(_topBar, 2);
+
+            var grid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 1,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260f));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132f));
+            _topBar.Controls.Add(grid);
+
+            var brandWrap = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            brandWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            brandWrap.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60f));
+            brandWrap.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+
+            var logoHost = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0, 0, 12, 0),
+                Padding = new Padding(0)
+            };
+
+            _pbLogo = new PictureBox
+            {
+                Size = new Size(42, 24),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Anchor = AnchorStyles.None,
+                Image = LoadLogoSafe()
+            };
+            logoHost.Controls.Add(_pbLogo);
+            logoHost.Resize += (_, __) =>
+            {
+                _pbLogo.Left = Math.Max(0, (logoHost.ClientSize.Width - _pbLogo.Width) / 2);
+                _pbLogo.Top = Math.Max(0, (logoHost.ClientSize.Height - _pbLogo.Height) / 2);
+            };
+
+            var titleWrap = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0, 1, 0, 0)
+            };
+            titleWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 24f));
+            titleWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 18f));
+
+            titleWrap.Controls.Add(new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "PCB Inspection System",
+                Font = new Font("Segoe UI Semibold", 14f),
+                ForeColor = Theme.Text,
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true,
+                Margin = new Padding(0)
+            }, 0, 0);
+
+            titleWrap.Controls.Add(new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "Realtime camera inspection · AI detection",
+                ForeColor = Theme.Muted,
+                Font = new Font("Segoe UI", 8.8f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true,
+                Margin = new Padding(0)
+            }, 0, 1);
+
+            brandWrap.Controls.Add(logoHost, 0, 0);
+            brandWrap.Controls.Add(titleWrap, 1, 0);
+
+            var statusWrap = new RoundedPanel
+            {
+                Dock = DockStyle.Fill,
+                FillColor = Theme.Surface2,
+                BorderColor = Theme.Border,
+                BorderThickness = 1f,
+                CornerRadius = 14,
+                Padding = new Padding(12, 8, 12, 8),
+                Margin = new Padding(8, 0, 8, 0)
+            };
+
+            var statusGrid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            statusGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 11f));
+            statusGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 18f));
+            statusGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 8f));
+
+            statusGrid.Controls.Add(new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "SYSTEM STATUS",
+                ForeColor = Theme.Muted,
+                Font = new Font("Segoe UI Semibold", 7.3f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true,
+                Margin = new Padding(0)
+            }, 0, 0);
+
+            _lbProgText = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "Ready",
+                ForeColor = Theme.Text,
+                Font = new Font("Segoe UI Semibold", 9f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true,
+                Margin = new Padding(0)
+            };
+            statusGrid.Controls.Add(_lbProgText, 0, 1);
+
+            _progTop = new ModernProgressBar
+            {
+                Dock = DockStyle.Fill,
+                Height = 8,
+                CornerRadius = 4,
+                TrackColor = Theme.Track,
+                ProgressColor = Theme.Accent,
+                Margin = new Padding(0)
+            };
+            statusGrid.Controls.Add(_progTop, 0, 2);
+            statusWrap.Controls.Add(statusGrid);
+
+            var buttonWrap = new RoundedPanel
+            {
+                Dock = DockStyle.Fill,
+                FillColor = Theme.Surface2,
+                BorderColor = Theme.Border,
+                BorderThickness = 1f,
+                CornerRadius = 14,
+                Padding = new Padding(8),
+                Margin = new Padding(0)
+            };
+
+            var buttonGrid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 5,
+                RowCount = 1,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            buttonGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            buttonGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 32f));
+            buttonGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6f));
+            buttonGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 32f));
+            buttonGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6f));
+            buttonGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 32f));
+
+            _btnWinMin = new ModernButton
+            {
+                Text = "–",
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0),
+                BackColor = Theme.ChromeBtn,
+                HoverBackColor = Theme.ChromeBtnHover,
+                PressedBackColor = Theme.ChromeBtnPressed,
+                ForeColor = Theme.Text,
+                CornerRadius = 10,
+                Font = new Font("Segoe UI Semibold", 8.5f),
+                Padding = new Padding(0)
+            };
+            _btnWinMin.Click += (_, __) => WindowState = FormWindowState.Minimized;
+
+            _btnWinMax = new ModernButton
+            {
+                Text = "□",
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0),
+                BackColor = Theme.ChromeBtn,
+                HoverBackColor = Theme.ChromeBtnHover,
+                PressedBackColor = Theme.ChromeBtnPressed,
+                ForeColor = Theme.Text,
+                CornerRadius = 10,
+                Font = new Font("Segoe UI Symbol", 8f, FontStyle.Bold),
+                Padding = new Padding(0)
+            };
+            _btnWinMax.Click += (_, __) => ToggleMaximize();
+
+            _btnWinClose = new ModernButton
+            {
+                Text = "✕",
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0),
+                BackColor = Theme.CloseBtn,
+                HoverBackColor = Theme.CloseBtnHover,
+                PressedBackColor = Theme.CloseBtnPressed,
+                ForeColor = Color.White,
+                CornerRadius = 10,
+                Font = new Font("Segoe UI Symbol", 8f, FontStyle.Bold),
+                Padding = new Padding(0)
+            };
+            _btnWinClose.Click += (_, __) => Close();
+
+            buttonGrid.Controls.Add(_btnWinMin, 0, 0);
+            buttonGrid.Controls.Add(_btnWinMax, 2, 0);
+            buttonGrid.Controls.Add(_btnWinClose, 4, 0);
+            buttonWrap.Controls.Add(buttonGrid);
+
+            grid.Controls.Add(brandWrap, 0, 0);
+            grid.Controls.Add(statusWrap, 1, 0);
+            grid.Controls.Add(buttonWrap, 2, 0);
+
+            WireDragMove(_topBar);
+            WireDragMove(brandWrap);
+            WireDragMove(titleWrap);
+            WireDragMove(logoHost);
+        }
+
+
         private void BuildRightPanel()
         {
             _rightCard = Card(Theme.Surface);
-            _rightCard.Padding = new Padding(12);
+            _rightCard.Padding = new Padding(14);
+            _rightCard.MinimumSize = new Size(320, 0);
             _root.Controls.Add(_rightCard, 1, 1);
 
             var grid = new TableLayoutPanel
@@ -331,20 +629,19 @@ namespace PCB_Inspection_System
                 ColumnCount = 1,
                 RowCount = 10,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0)
+                Margin = new Padding(0),
+                Padding = new Padding(0)
             };
-
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));   // model label
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));   // combo
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));   // spacer
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));   // restart
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));   // spacer
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));   // detect
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));   // spacer
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));  // current
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14));   // spacer
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // combined fill
-
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 18f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 44f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 112f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
             _rightCard.Controls.Add(grid);
 
             grid.Controls.Add(new Label
@@ -352,20 +649,37 @@ namespace PCB_Inspection_System
                 Dock = DockStyle.Fill,
                 Text = "Model",
                 ForeColor = Theme.Muted,
-                TextAlign = ContentAlignment.BottomLeft
+                Font = new Font("Segoe UI Semibold", 8.8f),
+                TextAlign = ContentAlignment.BottomLeft,
+                Margin = new Padding(0)
             }, 0, 0);
+
+            var comboHost = new RoundedPanel
+            {
+                Dock = DockStyle.Fill,
+                FillColor = Theme.InputBg,
+                BorderColor = Theme.InputBorder,
+                BorderThickness = 1f,
+                CornerRadius = 12,
+                Padding = new Padding(10, 4, 10, 4),
+                Margin = new Padding(0)
+            };
 
             _cbModel = new ComboBox
             {
                 Dock = DockStyle.Fill,
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                Font = new Font("Segoe UI", 10.5f),
+                Font = new Font("Segoe UI Semibold", 9.8f),
                 BackColor = Theme.InputBg,
                 ForeColor = Theme.Text,
+                FlatStyle = FlatStyle.Flat,
+                IntegralHeight = false,
+                DropDownHeight = 240,
                 Margin = new Padding(0)
             };
             _cbModel.SelectedIndexChanged += async (_, __) => await OnModelChangedAsync();
-            grid.Controls.Add(_cbModel, 0, 1);
+            comboHost.Controls.Add(_cbModel);
+            grid.Controls.Add(comboHost, 0, 1);
 
             _btnRestartServer = new ModernButton
             {
@@ -374,7 +688,10 @@ namespace PCB_Inspection_System
                 BackColor = Theme.Btn,
                 HoverBackColor = Theme.BtnHover,
                 PressedBackColor = Theme.BtnPressed,
-                ForeColor = Theme.Text
+                ForeColor = Theme.Text,
+                CornerRadius = 12,
+                Font = new Font("Segoe UI Semibold", 9.2f),
+                Margin = new Padding(0)
             };
             _btnRestartServer.Click += async (_, __) => await RestartServerAsync();
             grid.Controls.Add(_btnRestartServer, 0, 3);
@@ -386,16 +703,19 @@ namespace PCB_Inspection_System
                 BackColor = Theme.Accent,
                 HoverBackColor = Theme.AccentHover,
                 PressedBackColor = Theme.AccentPressed,
-                ForeColor = Color.White
+                ForeColor = Color.White,
+                CornerRadius = 14,
+                Font = new Font("Segoe UI Semibold", 10f),
+                Margin = new Padding(0)
             };
             _btnDetect.Click += async (_, __) => await DetectAsync();
             grid.Controls.Add(_btnDetect, 0, 5);
 
-            // ===== CURRENT CARD =====
             var cardCurrent = Card(Theme.Surface2);
-            cardCurrent.CornerRadius = 14;
+            cardCurrent.CornerRadius = 15;
             cardCurrent.Padding = new Padding(12);
             cardCurrent.Dock = DockStyle.Fill;
+            cardCurrent.Margin = new Padding(0);
 
             var curWrap = new TableLayoutPanel
             {
@@ -403,17 +723,20 @@ namespace PCB_Inspection_System
                 ColumnCount = 1,
                 RowCount = 2,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0)
+                Margin = new Padding(0),
+                Padding = new Padding(0)
             };
-            curWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-            curWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            curWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 18f));
+            curWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
             curWrap.Controls.Add(new Label
             {
                 Dock = DockStyle.Fill,
-                Text = "CURRENT (This Detect)",
+                Text = "CURRENT DETECT",
                 ForeColor = Theme.Muted,
-                TextAlign = ContentAlignment.MiddleLeft
+                Font = new Font("Segoe UI Semibold", 8.4f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0)
             }, 0, 0);
 
             var curStats = new TableLayoutPanel
@@ -422,16 +745,16 @@ namespace PCB_Inspection_System
                 ColumnCount = 2,
                 RowCount = 1,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0)
+                Margin = new Padding(0),
+                Padding = new Padding(0)
             };
-            curStats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            curStats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            curStats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            curStats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
 
             var curOk = MetricChip("OK", Theme.Ok, out _lbOk);
             var curNg = MetricChip("NG", Theme.Ng, out _lbNg);
-            curOk.Margin = new Padding(0, 0, 8, 0);
-            curNg.Margin = new Padding(8, 0, 0, 0);
-
+            curOk.Margin = new Padding(0, 0, 6, 0);
+            curNg.Margin = new Padding(6, 0, 0, 0);
             curStats.Controls.Add(curOk, 0, 0);
             curStats.Controls.Add(curNg, 1, 0);
 
@@ -439,25 +762,27 @@ namespace PCB_Inspection_System
             cardCurrent.Controls.Add(curWrap);
             grid.Controls.Add(cardCurrent, 0, 7);
 
-        
             var cardTotalHistory = Card(Theme.Surface2);
-            cardTotalHistory.CornerRadius = 14;
-            cardTotalHistory.Padding = new Padding(12);
+            cardTotalHistory.CornerRadius = 15;
+            cardTotalHistory.Padding = new Padding(14);
             cardTotalHistory.Dock = DockStyle.Fill;
+            cardTotalHistory.Margin = new Padding(0);
 
             var wrap = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 5,
+                RowCount = 6,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0)
+                Margin = new Padding(0),
+                Padding = new Padding(0)
             };
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));   
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));   
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 5));  
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));    
-            wrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 32f));
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 76f));
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 12f));
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 1f));
+            wrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
             var header = new TableLayoutPanel
             {
@@ -465,32 +790,33 @@ namespace PCB_Inspection_System
                 ColumnCount = 2,
                 RowCount = 1,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0)
+                Margin = new Padding(0, 0, 0, 0),
+                Padding = new Padding(0)
             };
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90f));
 
             header.Controls.Add(new Label
             {
                 Dock = DockStyle.Fill,
-                Text = "TOTAL (Checked Count)",
+                Text = "TOTAL + HISTORY",
                 ForeColor = Theme.Muted,
-                Font = new Font("Segoe UI Semibold", 9.5f),
-                TextAlign = ContentAlignment.MiddleLeft
+                Font = new Font("Segoe UI Semibold", 8.8f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 0, 10, 0)
             }, 0, 0);
 
             _btnRefresh = new ModernButton
             {
                 Dock = DockStyle.Fill,
-                Text = "Refresh",
-                CornerRadius = 14,
+                Text = "Clear",
+                CornerRadius = 11,
                 BackColor = Theme.Btn,
                 HoverBackColor = Theme.BtnHover,
                 PressedBackColor = Theme.BtnPressed,
                 ForeColor = Theme.Text,
-                Font = new Font("Segoe UI Semibold", 9f),
-                Height = 28,
-                Margin = new Padding(0, 3, 0, 3),
+                Font = new Font("Segoe UI Semibold", 8.2f),
+                Margin = new Padding(10, 0, 0, 0),
                 Padding = new Padding(0)
             };
             _btnRefresh.Click += (_, __) => ResetTotalsAndHistory();
@@ -502,20 +828,26 @@ namespace PCB_Inspection_System
                 ColumnCount = 2,
                 RowCount = 1,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0)
+                Margin = new Padding(0),
+                Padding = new Padding(0, 2, 0, 0)
             };
-            chips.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            chips.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            chips.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            chips.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
 
             var totOk = MetricChip("Total OK", Theme.Ok, out _lbTotalOk);
             var totNg = MetricChip("Total NG", Theme.Ng, out _lbTotalNg);
             totOk.Margin = new Padding(0, 0, 8, 0);
             totNg.Margin = new Padding(8, 0, 0, 0);
-
             chips.Controls.Add(totOk, 0, 0);
             chips.Controls.Add(totNg, 1, 0);
 
-            var divider = new Panel { Dock = DockStyle.Fill, Height = 1, BackColor = Theme.Border, Margin = new Padding(0) };
+            var divider = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Height = 1,
+                BackColor = Theme.Border,
+                Margin = new Padding(0)
+            };
 
             var historyHost = new RoundedPanel
             {
@@ -525,7 +857,7 @@ namespace PCB_Inspection_System
                 BorderThickness = 1f,
                 CornerRadius = 14,
                 Padding = new Padding(6),
-                Margin = new Padding(0, 8, 0, 0)
+                Margin = new Padding(0, 10, 0, 0)
             };
 
             var overlay = new Panel
@@ -550,7 +882,9 @@ namespace PCB_Inspection_System
                 GridColor = Theme.Border,
                 RowHeadersVisible = false,
                 EnableHeadersVisualStyles = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                ScrollBars = ScrollBars.Vertical,
+                Margin = new Padding(0)
             };
             UiPerf.EnableDoubleBuffer(_gvHistory);
             ConfigureHistoryGrid(_gvHistory);
@@ -561,42 +895,42 @@ namespace PCB_Inspection_System
                 AutoSize = true,
                 Text = "No history yet",
                 ForeColor = Theme.Muted,
-                Font = new Font("Segoe UI", 10f),
+                Font = new Font("Segoe UI", 9f),
                 BackColor = Color.Transparent
             };
 
             overlay.Controls.Add(_gvHistory);
             overlay.Controls.Add(_lbHistoryEmpty);
             _lbHistoryEmpty.BringToFront();
-
             overlay.Resize += (_, __) => PositionHistoryEmptyLabel();
-
             historyHost.Controls.Add(overlay);
 
             _history.ListChanged += (_, __) => UpdateHistoryEmptyState();
             UpdateHistoryEmptyState();
 
             wrap.Controls.Add(header, 0, 0);
-            wrap.Controls.Add(chips, 0, 1);
-            wrap.Controls.Add(new Panel { Dock = DockStyle.Fill }, 0, 2);
-            wrap.Controls.Add(divider, 0, 3);
-            wrap.Controls.Add(historyHost, 0, 4);
+            wrap.Controls.Add(new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) }, 0, 1);
+            wrap.Controls.Add(chips, 0, 2);
+            wrap.Controls.Add(new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) }, 0, 3);
+            wrap.Controls.Add(divider, 0, 4);
+            wrap.Controls.Add(historyHost, 0, 5);
 
             cardTotalHistory.Controls.Add(wrap);
             grid.Controls.Add(cardTotalHistory, 0, 9);
         }
 
-        
         private RoundedPanel MetricChip(string title, Color valueColor, out Label valueLabel)
         {
             var chip = new RoundedPanel
             {
                 Dock = DockStyle.Fill,
-                FillColor = Theme.Surface,
-                BorderColor = Theme.Border,
+                FillColor = Theme.MetricBg,
+                BorderColor = Theme.MetricBorder,
                 BorderThickness = 1f,
                 CornerRadius = 14,
-                Padding = new Padding(12, 10, 12, 10)
+                Padding = new Padding(14, 10, 14, 10),
+                Margin = new Padding(0),
+                MinimumSize = new Size(0, 72)
             };
 
             var g = new TableLayoutPanel
@@ -605,18 +939,21 @@ namespace PCB_Inspection_System
                 ColumnCount = 1,
                 RowCount = 2,
                 BackColor = Color.Transparent,
-                Margin = new Padding(0)
+                Margin = new Padding(0),
+                Padding = new Padding(0)
             };
-            g.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
-            g.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            g.RowStyles.Add(new RowStyle(SizeType.Absolute, 20f));
+            g.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
             g.Controls.Add(new Label
             {
                 Dock = DockStyle.Fill,
                 Text = title,
                 ForeColor = Theme.Muted,
-                Font = new Font("Segoe UI Semibold", 9f),
-                TextAlign = ContentAlignment.MiddleLeft
+                Font = new Font("Segoe UI Semibold", 8.6f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true,
+                Margin = new Padding(0)
             }, 0, 0);
 
             valueLabel = new Label
@@ -624,8 +961,11 @@ namespace PCB_Inspection_System
                 Dock = DockStyle.Fill,
                 Text = "0",
                 ForeColor = valueColor,
-                Font = new Font("Segoe UI Semibold", 18f),
-                TextAlign = ContentAlignment.MiddleLeft
+                Font = new Font("Segoe UI Semibold", 15.5f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoSize = false,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
             };
             g.Controls.Add(valueLabel, 0, 1);
 
@@ -633,72 +973,37 @@ namespace PCB_Inspection_System
             return chip;
         }
 
-        private void UpdateHistoryEmptyState()
-        {
-            if (_lbHistoryEmpty == null) return;
-
-            _lbHistoryEmpty.Visible = _history.Count == 0;
-            if (_lbHistoryEmpty.Visible)
-                PositionHistoryEmptyLabel();
-        }
-
-        private void PositionHistoryEmptyLabel()
-        {
-            if (_lbHistoryEmpty == null || _gvHistory == null) return;
-            var host = _gvHistory.Parent;
-            if (host == null) return;
-
-            int headerH = _gvHistory.ColumnHeadersVisible ? _gvHistory.ColumnHeadersHeight : 0;
-
-            int x = Math.Max(0, (host.ClientSize.Width - _lbHistoryEmpty.Width) / 2);
-            int y = headerH + Math.Max(0, (host.ClientSize.Height - headerH - _lbHistoryEmpty.Height) / 2);
-
-            _lbHistoryEmpty.Location = new Point(x, y);
-        }
-
-        private void ResetTotalsAndHistory()
-        {
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(ResetTotalsAndHistory));
-                return;
-            }
-
-            _totalOk = 0;
-            _totalNg = 0;
-
-            if (_lbTotalOk != null) _lbTotalOk.Text = "0";
-            if (_lbTotalNg != null) _lbTotalNg.Text = "0";
-
-            _history.Clear();
-            UpdateHistoryEmptyState();
-
-            LogInfo("Refresh: cleared TOTAL + HISTORY.");
-        }
-
         private void BuildLogPanel()
         {
             _logCard = Card(Theme.Surface);
             _logCard.Padding = new Padding(12);
-
+            _logCard.Margin = new Padding(0);
             _root.Controls.Add(_logCard, 0, 2);
             _root.SetColumnSpan(_logCard, 2);
 
-            var header = new Panel { Dock = DockStyle.Top, Height = 34, BackColor = Color.Transparent };
+            var header = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 28,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
             header.Controls.Add(new Label
             {
                 Dock = DockStyle.Left,
-                Width = 120,
-                Text = "Log",
-                Font = new Font("Segoe UI Semibold", 11f),
+                Width = 140,
+                Text = "System Log",
+                Font = new Font("Segoe UI Semibold", 9.4f),
                 ForeColor = Theme.Text,
-                TextAlign = ContentAlignment.MiddleLeft
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0)
             });
 
             var wrap = Card(Theme.Surface2);
             wrap.Dock = DockStyle.Fill;
-            wrap.CornerRadius = 14;
+            wrap.CornerRadius = 12;
             wrap.Padding = new Padding(10);
+            wrap.Margin = new Padding(0);
 
             _rtbLog = new RichTextBox
             {
@@ -706,8 +1011,9 @@ namespace PCB_Inspection_System
                 BorderStyle = BorderStyle.None,
                 BackColor = Theme.Surface2,
                 ForeColor = Theme.Text,
-                Font = new Font("Consolas", 9.5f),
-                DetectUrls = false
+                Font = new Font("Consolas", 8.6f),
+                DetectUrls = false,
+                ScrollBars = RichTextBoxScrollBars.Vertical
             };
 
             wrap.Controls.Add(_rtbLog);
@@ -715,63 +1021,36 @@ namespace PCB_Inspection_System
             _logCard.Controls.Add(header);
         }
 
-        private RoundedPanel ViewportPanel(string title, string subtitle, out PictureBox pb)
+
+        private void ToggleMaximize()
         {
-            var p = new RoundedPanel
+            if (WindowState == FormWindowState.Maximized)
             {
-                FillColor = Theme.Surface2,
-                BorderColor = Theme.Border,
-                CornerRadius = 16,
-                BorderThickness = 1f,
-                Padding = new Padding(10),
-                Dock = DockStyle.None,
-                Anchor = AnchorStyles.Top | AnchorStyles.Left,
-                Margin = new Padding(0)
-            };
-
-            UiPerf.EnableDoubleBuffer(p);
-
-            var header = new Panel { Dock = DockStyle.Top, Height = 34, BackColor = Color.Transparent };
-
-            header.Controls.Add(new Label
+                WindowState = FormWindowState.Normal;
+                Bounds = new Rectangle(120, 80, 1440, 900);
+            }
+            else
             {
-                Dock = DockStyle.Left,
-                Width = 260,
-                Text = title,
-                Font = new Font("Segoe UI Semibold", 10.5f),
-                ForeColor = Theme.Text,
-                TextAlign = ContentAlignment.MiddleLeft
-            });
+                MaximizedBounds = Screen.FromControl(this).WorkingArea;
+                WindowState = FormWindowState.Maximized;
+            }
+            UpdateWindowButtons();
+        }
 
-            header.Controls.Add(new Label
-            {
-                Dock = DockStyle.Fill,
-                Text = subtitle,
-                ForeColor = Theme.Muted,
-                TextAlign = ContentAlignment.MiddleRight
-            });
-
-            pb = new PictureBox
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Theme.ViewportBg,
-                SizeMode = PictureBoxSizeMode.Zoom
-            };
-
-            p.Controls.Add(pb);
-            p.Controls.Add(header);
-            return p;
+        private void UpdateWindowButtons()
+        {
+            if (_btnWinMax == null) return;
+            _btnWinMax.Text = WindowState == FormWindowState.Maximized ? "❐" : "□";
         }
 
         private RoundedPanel Card(Color fill) => new RoundedPanel
         {
             FillColor = fill,
             BorderColor = Theme.Border,
-            CornerRadius = 16,
+            CornerRadius = 18,
             BorderThickness = 1f,
             Dock = DockStyle.Fill
         };
-
 
         private void ApplyViewportLayout(bool animated)
         {
@@ -779,7 +1058,6 @@ namespace PCB_Inspection_System
             if (bounds.Width < 100 || bounds.Height < 100) return;
 
             const int gap = 12;
-
             Rectangle liveTarget;
             Rectangle resTarget;
 
@@ -809,7 +1087,6 @@ namespace PCB_Inspection_System
                 _panelLive.Bounds = liveTarget;
                 _panelResult.Bounds = resTarget;
                 _panelResult.Visible = _detectedMode;
-
                 _panelLive.BringToFront();
                 _panelLive.RefreshRegionNow();
                 _panelResult.RefreshRegionNow();
@@ -817,27 +1094,23 @@ namespace PCB_Inspection_System
             }
 
             _panelResult.Visible = true;
-
             StartViewportAnimation(liveTarget, resTarget, hideResultAfter: !_detectedMode);
         }
 
         private void EnterDetectedMode()
         {
             _detectedMode = true;
-
             if (!_panelResult.Visible)
             {
                 _panelResult.Visible = true;
                 _panelResult.Bounds = new Rectangle(_panelLive.Right + 12, _panelLive.Top, Math.Max(10, _panelLive.Width / 4), _panelLive.Height);
             }
-
             ApplyViewportLayout(animated: true);
         }
 
         private void StartViewportAnimation(Rectangle liveTo, Rectangle resTo, bool hideResultAfter)
         {
             StopViewportAnimation();
-
             _hideResultAfterAnim = hideResultAfter;
             _liveFrom = _panelLive.Bounds;
             _resFrom = _panelResult.Bounds;
@@ -851,24 +1124,20 @@ namespace PCB_Inspection_System
             _viewAnimTimer = new System.Windows.Forms.Timer { Interval = 16 };
             _viewAnimTimer.Tick += (_, __) =>
             {
-                const int durationMs = 240;
+                const int durationMs = 220;
                 float t = (float)_viewAnimSw.ElapsedMilliseconds / durationMs;
                 if (t >= 1f) t = 1f;
-
                 float k = EaseOutCubic(t);
 
                 _panelLive.Bounds = LerpRect(_liveFrom, _liveTo, k);
                 _panelResult.Bounds = LerpRect(_resFrom, _resTo, k);
-
                 _panelLive.BringToFront();
 
                 if (t >= 1f)
                 {
                     StopViewportAnimation();
-
                     if (_hideResultAfterAnim)
                         _panelResult.Visible = false;
-
                     _panelLive.SuppressRegionUpdate = false;
                     _panelResult.SuppressRegionUpdate = false;
                     _panelLive.RefreshRegionNow();
@@ -880,12 +1149,10 @@ namespace PCB_Inspection_System
 
         private void StopViewportAnimation()
         {
-            if (_viewAnimTimer != null)
-            {
-                _viewAnimTimer.Stop();
-                _viewAnimTimer.Dispose();
-                _viewAnimTimer = null;
-            }
+            if (_viewAnimTimer == null) return;
+            _viewAnimTimer.Stop();
+            _viewAnimTimer.Dispose();
+            _viewAnimTimer = null;
         }
 
         private static float EaseOutCubic(float t) => 1f - (float)Math.Pow(1f - t, 3);
@@ -912,7 +1179,6 @@ namespace PCB_Inspection_System
                 }
 
                 _videoSource = new VideoCaptureDevice(_videoDevices[0].MonikerString);
-
                 foreach (var cap in _videoSource.VideoCapabilities)
                 {
                     if (cap.FrameSize.Width == 2560 && cap.FrameSize.Height == 1440)
@@ -925,7 +1191,6 @@ namespace PCB_Inspection_System
                 _videoSource.NewFrame -= VideoSource_NewFrame;
                 _videoSource.NewFrame += VideoSource_NewFrame;
                 _videoSource.Start();
-
                 LogOk("Camera started.");
             }
             catch (Exception ex)
@@ -1020,7 +1285,6 @@ namespace PCB_Inspection_System
 
                 _pbLive.Image?.Dispose();
                 _pbLive.Image = null;
-
                 LogInfo("Camera stopped.");
             }
             catch (Exception ex)
@@ -1051,7 +1315,6 @@ namespace PCB_Inspection_System
             try
             {
                 DisableRightControls(true);
-
                 SetTopProgress("Restarting server...", indeterminate: true);
                 LogInfo("Restart AI server...");
 
@@ -1059,8 +1322,6 @@ namespace PCB_Inspection_System
 
                 var app = AppDomain.CurrentDomain.BaseDirectory;
                 var serverPy = Path.Combine(app, "AI_Server", "server.py");
-                var pythonExe = "py";
-
                 if (!File.Exists(serverPy))
                 {
                     LogError("Không thấy AI_Server/server.py");
@@ -1072,7 +1333,7 @@ namespace PCB_Inspection_System
                 {
                     StartInfo = new ProcessStartInfo
                     {
-                        FileName = pythonExe,
+                        FileName = "py",
                         Arguments = $"-3.11 \"{serverPy}\"",
                         WorkingDirectory = Path.GetDirectoryName(serverPy),
                         UseShellExecute = false,
@@ -1082,7 +1343,6 @@ namespace PCB_Inspection_System
                 _pythonProcess.Start();
 
                 await Task.Delay(1500);
-
                 SetTopProgress("Server ready", indeterminate: false, value: 0);
                 LogOk("Server restarted.");
             }
@@ -1116,7 +1376,6 @@ namespace PCB_Inspection_System
 
                 _cbModel.Items.Clear();
                 _cbModel.Items.AddRange(folders);
-
                 if (_cbModel.Items.Count > 0)
                     _cbModel.SelectedIndex = 0;
 
@@ -1131,7 +1390,6 @@ namespace PCB_Inspection_System
         private async Task OnModelChangedAsync()
         {
             if (_cbModel.SelectedItem == null) return;
-
             string selectedFolder = _cbModel.SelectedItem.ToString() ?? "";
             if (string.IsNullOrWhiteSpace(selectedFolder)) return;
 
@@ -1173,7 +1431,6 @@ namespace PCB_Inspection_System
             }
         }
 
-    
         private async Task DetectAsync()
         {
             if (_isDetecting)
@@ -1196,7 +1453,6 @@ namespace PCB_Inspection_System
             }
 
             DisableRightControls(true);
-
             var modelName = _cbModel.SelectedItem?.ToString() ?? "-";
             var ts = DateTime.Now;
             var sw = Stopwatch.StartNew();
@@ -1204,13 +1460,11 @@ namespace PCB_Inspection_System
             try
             {
                 _isDetecting = true;
-
                 EnterDetectedMode();
                 SetTopProgress("Detecting...", indeterminate: true);
                 LogInfo($"Detect started. Model={modelName}");
 
                 var result = await DetectFromBitmapAsync(safeFrame);
-
                 if (result == null)
                 {
                     SetTopProgress("Detect finished (no result)", indeterminate: false, value: 0);
@@ -1218,7 +1472,6 @@ namespace PCB_Inspection_System
                     return;
                 }
 
-            
                 _lbOk.Text = result.ok_count.ToString();
                 _lbNg.Text = result.ng_count.ToString();
 
@@ -1228,7 +1481,6 @@ namespace PCB_Inspection_System
                 _lbTotalNg.Text = _totalNg.ToString();
 
                 sw.Stop();
-
                 AddHistoryRow(new DetectHistoryRow
                 {
                     Timestamp = ts,
@@ -1251,30 +1503,6 @@ namespace PCB_Inspection_System
                 DisableRightControls(false);
                 safeFrame.Dispose();
             }
-        }
-
-        private void AddHistoryRow(DetectHistoryRow row)
-        {
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(() => AddHistoryRow(row)));
-                return;
-            }
-
-            _history.Insert(0, row);
-
-            if (_history.Count > 500)
-                _history.RemoveAt(_history.Count - 1);
-
-            UpdateHistoryEmptyState();
-        }
-
-        private static Bitmap CopyBitmap(Bitmap src)
-        {
-            var dst = new Bitmap(src.Width, src.Height, PixelFormat.Format24bppRgb);
-            using var g = Graphics.FromImage(dst);
-            g.DrawImage(src, 0, 0, src.Width, src.Height);
-            return dst;
         }
 
         private async Task<DetectResult?> DetectFromBitmapAsync(Bitmap frame)
@@ -1300,18 +1528,38 @@ namespace PCB_Inspection_System
                 PropertyNameCaseInsensitive = true
             });
 
-            if (result == null) return null;
-            if (string.IsNullOrWhiteSpace(result.image_base64)) return null;
+            if (result == null || string.IsNullOrWhiteSpace(result.image_base64))
+                return null;
 
             byte[] bytes = Convert.FromBase64String(result.image_base64);
             using var ms2 = new MemoryStream(bytes);
-
             using var tmp = new Bitmap(ms2);
             var oldImg = _pbResult.Image;
-            _pbResult.Image = new Bitmap(tmp); // ✅ clone
+            _pbResult.Image = new Bitmap(tmp);
             oldImg?.Dispose();
-
             return result;
+        }
+
+        private void AddHistoryRow(DetectHistoryRow row)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => AddHistoryRow(row)));
+                return;
+            }
+
+            _history.Insert(0, row);
+            if (_history.Count > 500)
+                _history.RemoveAt(_history.Count - 1);
+            UpdateHistoryEmptyState();
+        }
+
+        private static Bitmap CopyBitmap(Bitmap src)
+        {
+            var dst = new Bitmap(src.Width, src.Height, PixelFormat.Format24bppRgb);
+            using var g = Graphics.FromImage(dst);
+            g.DrawImage(src, 0, 0, src.Width, src.Height);
+            return dst;
         }
 
         private void DisableRightControls(bool busy)
@@ -1341,6 +1589,43 @@ namespace PCB_Inspection_System
             _progTop.Value = indeterminate ? 0 : Math.Clamp(value, 0, 100);
         }
 
+        private void ResetTotalsAndHistory()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(ResetTotalsAndHistory));
+                return;
+            }
+
+            _totalOk = 0;
+            _totalNg = 0;
+            _lbTotalOk.Text = "0";
+            _lbTotalNg.Text = "0";
+            _history.Clear();
+            UpdateHistoryEmptyState();
+            LogInfo("Refresh: cleared TOTAL + HISTORY.");
+        }
+
+        private void UpdateHistoryEmptyState()
+        {
+            if (_lbHistoryEmpty == null) return;
+            _lbHistoryEmpty.Visible = _history.Count == 0;
+            if (_lbHistoryEmpty.Visible)
+                PositionHistoryEmptyLabel();
+        }
+
+        private void PositionHistoryEmptyLabel()
+        {
+            if (_lbHistoryEmpty == null || _gvHistory == null) return;
+            var host = _gvHistory.Parent;
+            if (host == null) return;
+
+            int headerH = _gvHistory.ColumnHeadersVisible ? _gvHistory.ColumnHeadersHeight : 0;
+            int x = Math.Max(0, (host.ClientSize.Width - _lbHistoryEmpty.Width) / 2);
+            int y = headerH + Math.Max(0, (host.ClientSize.Height - headerH - _lbHistoryEmpty.Height) / 2);
+            _lbHistoryEmpty.Location = new Point(x, y);
+        }
+
         private void LogInfo(string msg) => EnqueueLog("INFO", msg, Theme.LogInfo);
         private void LogOk(string msg) => EnqueueLog("OK", msg, Theme.LogOk);
         private void LogError(string msg) => EnqueueLog("ERR", msg, Theme.LogErr);
@@ -1352,9 +1637,7 @@ namespace PCB_Inspection_System
 
         private void FlushLogBatch(int maxLines)
         {
-            if (_rtbLog.IsDisposed || !_rtbLog.IsHandleCreated) return;
-            if (_logQueue.IsEmpty) return;
-
+            if (_rtbLog.IsDisposed || !_rtbLog.IsHandleCreated || _logQueue.IsEmpty) return;
             if (InvokeRequired)
             {
                 BeginInvoke(new Action(() => FlushLogBatch(maxLines)));
@@ -1375,15 +1658,11 @@ namespace PCB_Inspection_System
             _rtbLog.ScrollToCaret();
         }
 
-        private readonly record struct LogItem(string Tag, string Message, Color Color);
-
         private async void OnFormClosing(object? sender, FormClosingEventArgs e)
         {
             _isClosing = true;
-
             StopViewportAnimation();
             _logFlushTimer.Stop();
-
             StopCamera();
             StopPythonServer();
 
@@ -1406,12 +1685,117 @@ namespace PCB_Inspection_System
                 using var ms = new MemoryStream();
                 fs.CopyTo(ms);
                 ms.Position = 0;
-
                 using var img = Image.FromStream(ms);
                 return (Image)img.Clone();
             }
-            catch { return null; }
+            catch
+            {
+                return null;
+            }
         }
+
+        private void ConfigureHistoryGrid(DataGridView gv)
+        {
+            gv.SuspendLayout();
+            gv.AutoGenerateColumns = false;
+            gv.Columns.Clear();
+            gv.ReadOnly = true;
+            gv.AllowUserToAddRows = false;
+            gv.AllowUserToDeleteRows = false;
+            gv.AllowUserToResizeRows = false;
+            gv.AllowUserToResizeColumns = false;
+            gv.MultiSelect = false;
+            gv.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            gv.RowHeadersVisible = false;
+            gv.BorderStyle = BorderStyle.None;
+            gv.BackgroundColor = Theme.Surface;
+            gv.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            gv.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+            gv.GridColor = Theme.Border;
+            gv.EnableHeadersVisualStyles = false;
+            gv.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            gv.ColumnHeadersHeight = 28;
+            gv.RowTemplate.Height = 28;
+            gv.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+
+            gv.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Theme.GridHeader,
+                ForeColor = Theme.Text,
+                Font = new Font("Segoe UI Semibold", 8.8f),
+                Alignment = DataGridViewContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 0, 8, 0),
+                WrapMode = DataGridViewTriState.False
+            };
+
+            gv.DefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Theme.Surface,
+                ForeColor = Theme.Text,
+                Font = new Font("Segoe UI", 8.8f),
+                SelectionBackColor = Theme.RowSelect,
+                SelectionForeColor = Theme.Text,
+                Padding = new Padding(8, 0, 8, 0),
+                WrapMode = DataGridViewTriState.False
+            };
+
+            gv.AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Theme.RowAlt,
+                ForeColor = Theme.Text,
+                SelectionBackColor = Theme.RowSelect,
+                SelectionForeColor = Theme.Text,
+                Padding = new Padding(8, 0, 8, 0)
+            };
+
+            gv.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = nameof(DetectHistoryRow.Timestamp),
+                HeaderText = "Time",
+                FillWeight = 34,
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    Format = "HH:mm:ss",
+                    Padding = new Padding(8, 0, 8, 0)
+                }
+            });
+
+            gv.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = nameof(DetectHistoryRow.Model),
+                HeaderText = "Model",
+                FillWeight = 34
+            });
+
+            gv.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = nameof(DetectHistoryRow.OK),
+                HeaderText = "OK",
+                FillWeight = 16,
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    ForeColor = Theme.Ok,
+                    Alignment = DataGridViewContentAlignment.MiddleLeft,
+                    Padding = new Padding(8, 0, 8, 0)
+                }
+            });
+
+            gv.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = nameof(DetectHistoryRow.NG),
+                HeaderText = "NG",
+                FillWeight = 16,
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    ForeColor = Theme.Ng,
+                    Alignment = DataGridViewContentAlignment.MiddleLeft,
+                    Padding = new Padding(8, 0, 8, 0)
+                }
+            });
+
+            gv.ResumeLayout();
+        }
+
 
         public sealed class DetectResult
         {
@@ -1428,141 +1812,45 @@ namespace PCB_Inspection_System
             public int NG { get; set; }
         }
 
-        private void ConfigureHistoryGrid(DataGridView gv)
-        {
-            gv.SuspendLayout();
-
-            gv.AutoGenerateColumns = false;
-            gv.Columns.Clear();
-
-            gv.ReadOnly = true;
-            gv.AllowUserToAddRows = false;
-            gv.AllowUserToDeleteRows = false;
-            gv.AllowUserToResizeRows = false;
-            gv.AllowUserToResizeColumns = false;
-            gv.MultiSelect = false;
-            gv.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-
-            gv.RowHeadersVisible = false;
-            gv.BorderStyle = BorderStyle.None;
-            gv.BackgroundColor = Theme.Surface;
-
-            gv.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
-            gv.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
-            gv.GridColor = Theme.Border;
-
-            gv.EnableHeadersVisualStyles = false;
-            gv.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
-            gv.ColumnHeadersHeight = 30;
-
-            gv.RowTemplate.Height = 30;
-            gv.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-
-            gv.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
-            {
-                BackColor = Theme.Track,
-                ForeColor = Theme.Text,
-                Font = new Font("Segoe UI Semibold", 9.5f),
-                Alignment = DataGridViewContentAlignment.MiddleLeft,
-                Padding = new Padding(8, 0, 8, 0),
-                WrapMode = DataGridViewTriState.False
-            };
-
-            gv.DefaultCellStyle = new DataGridViewCellStyle
-            {
-                BackColor = Theme.Surface,
-                ForeColor = Theme.Text,
-                Font = new Font("Segoe UI", 9.5f),
-                SelectionBackColor = Color.FromArgb(220, 235, 255),
-                SelectionForeColor = Theme.Text,
-                Padding = new Padding(8, 0, 8, 0),
-                WrapMode = DataGridViewTriState.False
-            };
-
-            gv.AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
-            {
-                BackColor = Color.FromArgb(244, 246, 250),
-                ForeColor = Theme.Text,
-                SelectionBackColor = Color.FromArgb(220, 235, 255),
-                SelectionForeColor = Theme.Text,
-                Padding = new Padding(8, 0, 8, 0)
-            };
-
-            gv.Columns.Add(new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = nameof(DetectHistoryRow.Timestamp),
-                HeaderText = "Time",
-                FillWeight = 42,
-                DefaultCellStyle = new DataGridViewCellStyle { Format = "HH:mm:ss", Padding = new Padding(8, 0, 8, 0) }
-            });
-
-            gv.Columns.Add(new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = nameof(DetectHistoryRow.Model),
-                HeaderText = "Model",
-                FillWeight = 30
-            });
-
-            gv.Columns.Add(new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = nameof(DetectHistoryRow.OK),
-                HeaderText = "OK",
-                FillWeight = 14,
-                DefaultCellStyle = new DataGridViewCellStyle
-                {
-                    ForeColor = Theme.Ok,
-                    Alignment = DataGridViewContentAlignment.MiddleLeft,
-                    Padding = new Padding(8, 0, 8, 0)
-                }
-            });
-
-            gv.Columns.Add(new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = nameof(DetectHistoryRow.NG),
-                HeaderText = "NG",
-                FillWeight = 14,
-                DefaultCellStyle = new DataGridViewCellStyle
-                {
-                    ForeColor = Theme.Ng,
-                    Alignment = DataGridViewContentAlignment.MiddleLeft,
-                    Padding = new Padding(8, 0, 8, 0)
-                }
-            });
-
-            gv.ResumeLayout();
-        }
+        private readonly record struct LogItem(string Tag, string Message, Color Color);
 
         private static class Theme
         {
-            public static readonly Color Bg = Color.FromArgb(245, 246, 248);
-            public static readonly Color Surface = Color.White;
-            public static readonly Color Surface2 = Color.FromArgb(248, 249, 251);
-
-            public static readonly Color Border = Color.FromArgb(220, 226, 235);
-            public static readonly Color Shadow = Color.FromArgb(18, 0, 0, 0);
-
-            public static readonly Color Text = Color.FromArgb(25, 33, 45);
-            public static readonly Color Muted = Color.FromArgb(92, 105, 125);
-
-            public static readonly Color Accent = Color.FromArgb(0, 122, 255);
-            public static readonly Color AccentHover = Color.FromArgb(30, 142, 255);
-            public static readonly Color AccentPressed = Color.FromArgb(0, 105, 220);
-
-            public static readonly Color Btn = Color.FromArgb(243, 245, 248);
-            public static readonly Color BtnHover = Color.FromArgb(235, 239, 245);
-            public static readonly Color BtnPressed = Color.FromArgb(226, 233, 242);
-
-            public static readonly Color InputBg = Color.White;
-
-            public static readonly Color Track = Color.FromArgb(228, 234, 242);
-            public static readonly Color ViewportBg = Color.FromArgb(245, 247, 250);
-
-            public static readonly Color Ok = Color.FromArgb(0, 140, 90);
-            public static readonly Color Ng = Color.FromArgb(220, 50, 70);
-
-            public static readonly Color LogInfo = Color.FromArgb(70, 80, 95);
-            public static readonly Color LogOk = Color.FromArgb(0, 130, 85);
-            public static readonly Color LogErr = Color.FromArgb(200, 40, 55);
+            public static readonly Color AppBorder = Color.FromArgb(14, 29, 56);
+            public static readonly Color WindowEdge = Color.FromArgb(11, 24, 46);
+            public static readonly Color Bg = Color.FromArgb(232, 240, 250);
+            public static readonly Color Surface = Color.FromArgb(246, 250, 255);
+            public static readonly Color Surface2 = Color.FromArgb(238, 245, 255);
+            public static readonly Color Border = Color.FromArgb(196, 214, 235);
+            public static readonly Color Shadow = Color.FromArgb(22, 10, 35, 72);
+            public static readonly Color Text = Color.FromArgb(18, 37, 65);
+            public static readonly Color Muted = Color.FromArgb(87, 112, 145);
+            public static readonly Color Accent = Color.FromArgb(24, 94, 188);
+            public static readonly Color AccentHover = Color.FromArgb(34, 108, 208);
+            public static readonly Color AccentPressed = Color.FromArgb(20, 80, 164);
+            public static readonly Color Btn = Color.FromArgb(223, 236, 252);
+            public static readonly Color BtnHover = Color.FromArgb(209, 228, 249);
+            public static readonly Color BtnPressed = Color.FromArgb(193, 218, 246);
+            public static readonly Color ChromeBtn = Color.FromArgb(224, 236, 250);
+            public static readonly Color ChromeBtnHover = Color.FromArgb(210, 227, 247);
+            public static readonly Color ChromeBtnPressed = Color.FromArgb(192, 213, 240);
+            public static readonly Color CloseBtn = Color.FromArgb(219, 73, 93);
+            public static readonly Color CloseBtnHover = Color.FromArgb(235, 88, 107);
+            public static readonly Color CloseBtnPressed = Color.FromArgb(194, 58, 76);
+            public static readonly Color InputBg = Color.FromArgb(255, 255, 255);
+            public static readonly Color InputBorder = Color.FromArgb(145, 182, 226);
+            public static readonly Color Track = Color.FromArgb(206, 222, 242);
+            public static readonly Color ViewportBg = Color.FromArgb(226, 236, 248);
+            public static readonly Color MetricBg = Color.FromArgb(247, 250, 255);
+            public static readonly Color MetricBorder = Color.FromArgb(194, 213, 235);
+            public static readonly Color GridHeader = Color.FromArgb(218, 232, 248);
+            public static readonly Color RowAlt = Color.FromArgb(242, 247, 255);
+            public static readonly Color RowSelect = Color.FromArgb(204, 225, 252);
+            public static readonly Color Ok = Color.FromArgb(15, 145, 108);
+            public static readonly Color Ng = Color.FromArgb(214, 61, 92);
+            public static readonly Color LogInfo = Color.FromArgb(68, 94, 126);
+            public static readonly Color LogOk = Color.FromArgb(17, 130, 100);
+            public static readonly Color LogErr = Color.FromArgb(198, 54, 82);
         }
 
         private static class UiPerf
@@ -1570,26 +1858,15 @@ namespace PCB_Inspection_System
             public static void EnableDoubleBuffer(Control c)
             {
                 if (c is null) return;
-
                 try
                 {
-                    typeof(Control)
-                        .GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic)
-                        ?.SetValue(c, true, null);
-
-                    typeof(Control)
-                        .GetMethod("SetStyle", BindingFlags.Instance | BindingFlags.NonPublic)
-                        ?.Invoke(c, new object[]
-                        {
-                            ControlStyles.AllPaintingInWmPaint |
-                            ControlStyles.UserPaint |
-                            ControlStyles.OptimizedDoubleBuffer,
-                            true
-                        });
-
-                    typeof(Control)
-                        .GetMethod("UpdateStyles", BindingFlags.Instance | BindingFlags.NonPublic)
-                        ?.Invoke(c, null);
+                    typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic)?.SetValue(c, true, null);
+                    typeof(Control).GetMethod("SetStyle", BindingFlags.Instance | BindingFlags.NonPublic)?.Invoke(c, new object[]
+                    {
+                        ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer,
+                        true
+                    });
+                    typeof(Control).GetMethod("UpdateStyles", BindingFlags.Instance | BindingFlags.NonPublic)?.Invoke(c, null);
                 }
                 catch { }
             }
@@ -1601,8 +1878,7 @@ namespace PCB_Inspection_System
             public Color FillColor { get; set; } = Theme.Surface;
             public Color BorderColor { get; set; } = Theme.Border;
             public float BorderThickness { get; set; } = 1f;
-
-            public bool SuppressRegionUpdate { get; set; } = false;
+            public bool SuppressRegionUpdate { get; set; }
 
             private GraphicsPath? _cachedPath;
             private Rectangle _cachedRect;
@@ -1617,20 +1893,30 @@ namespace PCB_Inspection_System
             protected override void OnSizeChanged(EventArgs e)
             {
                 base.OnSizeChanged(e);
-                if (SuppressRegionUpdate) return;
-                RefreshRegionNow();
+                if (SuppressRegionUpdate || !IsHandleCreated || Width < 8 || Height < 8) return;
+
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed || !IsHandleCreated || SuppressRegionUpdate || Width < 8 || Height < 8) return;
+                    RefreshRegionNow();
+                }));
+            }
+
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                if (!SuppressRegionUpdate && Width > 8 && Height > 8)
+                    RefreshRegionNow();
             }
 
             public void RefreshRegionNow()
             {
                 if (Width <= 2 || Height <= 2) return;
-
                 var rect = new Rectangle(0, 0, Width, Height);
                 if (rect == _cachedRect && _cachedPath != null) return;
-
                 _cachedRect = rect;
                 _cachedPath?.Dispose();
-                _cachedPath = RoundRect(new Rectangle(0, 0, Width, Height), CornerRadius);
+                _cachedPath = RoundRect(rect, CornerRadius);
                 Region = new Region(_cachedPath);
                 Invalidate();
             }
@@ -1638,25 +1924,14 @@ namespace PCB_Inspection_System
             protected override void OnPaint(PaintEventArgs e)
             {
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-
                 var rect = new Rectangle(0, 0, Width - 1, Height - 1);
                 if (rect.Width <= 2 || rect.Height <= 2) return;
 
-                using (var sh = RoundRect(new Rectangle(2, 3, rect.Width - 2, rect.Height - 2), CornerRadius))
-                using (var shBrush = new SolidBrush(Theme.Shadow))
-                    e.Graphics.FillPath(shBrush, sh);
-
                 using var path = RoundRect(rect, CornerRadius);
-
-                var bottom = Color.FromArgb(
-                    Math.Max(0, FillColor.R - 4),
-                    Math.Max(0, FillColor.G - 4),
-                    Math.Max(0, FillColor.B - 6));
-
-                using (var br = new LinearGradientBrush(rect, FillColor, bottom, LinearGradientMode.Vertical))
+                using (var br = new SolidBrush(FillColor))
                     e.Graphics.FillPath(br, path);
 
-                using var pen = new Pen(Color.FromArgb(220, BorderColor), BorderThickness);
+                using var pen = new Pen(BorderColor, BorderThickness);
                 e.Graphics.DrawPath(pen, path);
             }
 
@@ -1665,7 +1940,6 @@ namespace PCB_Inspection_System
                 var path = new GraphicsPath();
                 int rr = Math.Max(0, Math.Min(radius, Math.Min(r.Width / 2, r.Height / 2)));
                 int d = rr * 2;
-
                 if (rr <= 0)
                 {
                     path.AddRectangle(r);
@@ -1688,20 +1962,19 @@ namespace PCB_Inspection_System
             public Color HoverBackColor { get; set; } = Theme.BtnHover;
             public Color PressedBackColor { get; set; } = Theme.BtnPressed;
 
-            private bool _hover, _down;
+            private bool _hover;
+            private bool _down;
             private Color _normal;
 
             public ModernButton()
             {
                 FlatStyle = FlatStyle.Flat;
                 FlatAppearance.BorderSize = 0;
-                Height = 44;
+                Height = 40;
                 Cursor = Cursors.Hand;
-                Padding = new Padding(12, 8, 12, 8);
+                Padding = new Padding(0);
                 Margin = new Padding(0);
-
                 _normal = BackColor;
-
                 MouseEnter += (_, __) => { _hover = true; Invalidate(); };
                 MouseLeave += (_, __) => { _hover = false; _down = false; Invalidate(); };
                 MouseDown += (_, __) => { _down = true; Invalidate(); };
@@ -1717,13 +1990,7 @@ namespace PCB_Inspection_System
             protected override void OnResize(EventArgs e)
             {
                 base.OnResize(e);
-                using var path = new GraphicsPath();
-                int r = CornerRadius * 2;
-                path.AddArc(0, 0, r, r, 180, 90);
-                path.AddArc(Width - r, 0, r, r, 270, 90);
-                path.AddArc(Width - r, Height - r, r, r, 0, 90);
-                path.AddArc(0, Height - r, r, r, 90, 90);
-                path.CloseFigure();
+                using var path = CreateRoundPath(new Rectangle(0, 0, Width, Height), CornerRadius);
                 Region = new Region(path);
             }
 
@@ -1732,23 +1999,85 @@ namespace PCB_Inspection_System
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
 
                 var bg = _normal;
-                if (_down) bg = PressedBackColor;
+                if (!Enabled) bg = ControlPaint.Light(_normal, 0.12f);
+                else if (_down) bg = PressedBackColor;
                 else if (_hover) bg = HoverBackColor;
 
+                var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+                using var path = CreateRoundPath(rect, CornerRadius);
                 using var br = new SolidBrush(bg);
-                e.Graphics.FillRectangle(br, ClientRectangle);
-
                 using var pen = new Pen(Theme.Border, 1f);
-                e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
 
-                TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, ForeColor,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                e.Graphics.FillPath(br, path);
+                e.Graphics.DrawPath(pen, path);
+
+                string drawText = Text == "–" ? "−" : Text;
+                var textRect = new Rectangle(rect.X, rect.Y - 1, rect.Width, rect.Height + 1);
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    drawText,
+                    Font,
+                    textRect,
+                    Enabled ? ForeColor : ControlPaint.Dark(ForeColor),
+                    TextFormatFlags.HorizontalCenter |
+                    TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.SingleLine |
+                    TextFormatFlags.NoPadding |
+                    TextFormatFlags.EndEllipsis);
+            }
+
+            private static GraphicsPath CreateRoundPath(Rectangle rect, int radius)
+            {
+                var path = new GraphicsPath();
+                int r = Math.Max(0, Math.Min(radius, Math.Min(rect.Width / 2, rect.Height / 2)));
+                if (r <= 0)
+                {
+                    path.AddRectangle(rect);
+                    path.CloseFigure();
+                    return path;
+                }
+
+                int d = r * 2;
+                path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+                path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+                path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+                path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+                path.CloseFigure();
+                return path;
             }
         }
 
+        private void UpdateResponsiveLayout()
+        {
+            if (_root == null) return;
+
+            int width = ClientSize.Width;
+            int height = ClientSize.Height;
+            bool compact = width < 1500;
+            bool shortScreen = height < 860;
+
+            _root.Padding = compact ? new Padding(12, 10, 12, 12) : new Padding(16, 12, 16, 14);
+            _root.ColumnStyles[1].Width = compact ? 320f : 360f;
+            _root.RowStyles[0].Height = compact ? 72f : 78f;
+            _root.RowStyles[2].Height = shortScreen ? 104f : (compact ? 112f : 120f);
+
+            if (_topBar != null)
+                _topBar.Padding = compact ? new Padding(14, 10, 14, 10) : new Padding(16, 12, 16, 12);
+
+            if (_rightCard != null)
+                _rightCard.Padding = compact ? new Padding(12) : new Padding(14);
+
+            if (_viewportCard != null)
+                _viewportCard.Padding = compact ? new Padding(10) : new Padding(12);
+
+            PositionHistoryEmptyLabel();
+            ApplyViewportLayout(animated: false);
+        }
+
+
         private sealed class ModernProgressBar : Control
         {
-            public int Minimum { get; set; } = 0;
+            public int Minimum { get; set; }
             public int Maximum { get; set; } = 100;
 
             private int _value;
@@ -1758,6 +2087,7 @@ namespace PCB_Inspection_System
                 set { _value = Math.Clamp(value, Minimum, Maximum); Invalidate(); }
             }
 
+            private bool _indeterminate;
             public bool Indeterminate
             {
                 get => _indeterminate;
@@ -1773,7 +2103,6 @@ namespace PCB_Inspection_System
             public Color TrackColor { get; set; } = Theme.Track;
             public Color ProgressColor { get; set; } = Theme.Accent;
 
-            private bool _indeterminate;
             private readonly System.Windows.Forms.Timer _timer;
             private int _phase;
 
@@ -1782,7 +2111,6 @@ namespace PCB_Inspection_System
                 SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
                 Height = 10;
                 Margin = new Padding(0);
-
                 _timer = new System.Windows.Forms.Timer { Interval = 30 };
                 _timer.Tick += (_, __) =>
                 {
@@ -1794,7 +2122,6 @@ namespace PCB_Inspection_System
             protected override void OnPaint(PaintEventArgs e)
             {
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-
                 var rect = new Rectangle(0, 0, Width - 1, Height - 1);
                 if (rect.Width <= 2 || rect.Height <= 2) return;
 
@@ -1816,7 +2143,6 @@ namespace PCB_Inspection_System
                 float pct = (Maximum <= Minimum) ? 0 : (float)(Value - Minimum) / (Maximum - Minimum);
                 int fillW = (int)Math.Round(rect.Width * pct);
                 if (fillW <= 0) return;
-
                 var fillRect = new Rectangle(rect.X, rect.Y, fillW, rect.Height);
                 using var fillPath = RoundRect(fillRect, CornerRadius);
                 using var fillBrush = new SolidBrush(ProgressColor);
@@ -1827,10 +2153,8 @@ namespace PCB_Inspection_System
             {
                 var path = new GraphicsPath();
                 if (r.Width <= 0 || r.Height <= 0) return path;
-
                 int rr = Math.Min(radius, Math.Min(r.Width / 2, r.Height / 2));
                 int d = rr * 2;
-
                 if (rr <= 0)
                 {
                     path.AddRectangle(r);
@@ -1845,6 +2169,7 @@ namespace PCB_Inspection_System
                 path.CloseFigure();
                 return path;
             }
+
         }
     }
 }

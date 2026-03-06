@@ -19,7 +19,9 @@ CAMERA_PARAM_PATH = "camera_params.npz"
 
 NG_CLASS_INDEX = 0
 OK_CLASS_INDEX = 1
-
+IMGZ=1280
+CONF=0.6
+IOU = 0.3
 # =============================
 # INIT
 # =============================
@@ -100,8 +102,9 @@ async def detect_capture(request: CaptureRequest):
         # =============================
         results = model.predict(
             img,
-            imgsz=2560,
-            conf=0.4,
+            imgsz=IMGZ,
+            conf=CONF,
+            iou = IOU,
             verbose=False
         )[0]
 
@@ -182,8 +185,9 @@ async def detect(file: UploadFile = File(...)):
         # =============================
         results = model.predict(
             img,
-            imgsz=2560,
-            conf=0.4,
+            imgsz=IMGZ,
+            conf=CONF,
+            iou = IOU,
             verbose=False
         )[0]
 
