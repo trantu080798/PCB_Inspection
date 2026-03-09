@@ -5,7 +5,10 @@ AI_Server   - best.pt
             - Readme
 Bước 2: viết code server.py
 Bước 3: Cài thư viện cần thiết
+    - pip install opencv-python  
+    - pip install ultralytics 
     - pip install fastapi uvicorn opencv-python ultralytics numpy
+    - pip install python-multipart  
     - pip install psutil
 
 chạy thử nghiệm

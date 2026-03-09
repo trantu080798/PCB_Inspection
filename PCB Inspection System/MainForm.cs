@@ -84,6 +84,8 @@ namespace PCB_Inspection_System
         private readonly Stopwatch _viewAnimSw = new();
         private Rectangle _liveFrom, _liveTo, _resFrom, _resTo;
         private bool _hideResultAfterAnim;
+        private int total_objects_detected;
+        private bool isLRimage = false;
 
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
@@ -184,7 +186,10 @@ namespace PCB_Inspection_System
         private async Task RunDetectShortcutAsync()
         {
             if (!_isDetecting)
-                await DetectAsync();
+                if(isLRimage)
+                    await DetectLRAsync();
+                else
+                    await DetectAsync();
         }
 
         private void MainForm_KeyUp(object? sender, KeyEventArgs e)
@@ -708,7 +713,13 @@ namespace PCB_Inspection_System
                 Font = new Font("Segoe UI Semibold", 10f),
                 Margin = new Padding(0)
             };
-            _btnDetect.Click += async (_, __) => await DetectAsync();
+            _btnDetect.Click += async (_, __) =>
+            {
+                if (isLRimage)
+                    await DetectLRAsync();
+                else
+                    await DetectAsync();
+            };
             grid.Controls.Add(_btnDetect, 0, 5);
 
             var cardCurrent = Card(Theme.Surface2);
@@ -1166,7 +1177,7 @@ namespace PCB_Inspection_System
             return new Rectangle(x, y, w, h);
         }
 
-        private void StartCamera()
+        private void StartCamera(int width = 1280, int height = 720)
         {
             try
             {
@@ -1177,11 +1188,36 @@ namespace PCB_Inspection_System
                     SetTopProgress("No camera", indeterminate: false, value: 0);
                     return;
                 }
-
-                _videoSource = new VideoCaptureDevice(_videoDevices[0].MonikerString);
+                int device_num = 0;
+                var param_path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "AI_Server", "camera_parameter.txt");
+                if (!File.Exists(param_path))
+                {
+                    LogError("Không thấy AI_Server/camera_parameter.txt");
+                    return;
+                }
+                else
+                {
+                    try
+                    {
+                        string[] lines = File.ReadAllLines(param_path);
+                        if (int.TryParse(lines[3],out int devNum) && devNum >= 0 && devNum < _videoDevices.Count)
+                        {
+                            device_num = devNum;
+                        }
+                        else
+                        {
+                            LogError("Invalid camera number in camera_parameter.txt. Using default camera 0.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError("Error reading camera_parameter.txt: " + ex.Message);
+                    }
+                }
+                _videoSource = new VideoCaptureDevice(_videoDevices[device_num].MonikerString);
                 foreach (var cap in _videoSource.VideoCapabilities)
                 {
-                    if (cap.FrameSize.Width == 2560 && cap.FrameSize.Height == 1440)
+                    if (cap.FrameSize.Width == width && cap.FrameSize.Height == height)
                     {
                         _videoSource.VideoResolution = cap;
                         break;
@@ -1221,11 +1257,15 @@ namespace PCB_Inspection_System
                 _displayFrameCounter++;
                 if (_displayFrameCounter % 3 != 0) return;
 
-                displayFrame = new Bitmap(640, 480, PixelFormat.Format24bppRgb);
+                displayFrame = new Bitmap(640, 360, PixelFormat.Format24bppRgb);
                 using (var g = Graphics.FromImage(displayFrame))
                 {
                     g.InterpolationMode = InterpolationMode.Low;
-                    g.DrawImage(raw, 0, 0, 640, 480);
+                    
+                    g.DrawImage(raw, 0, 0, 640, 360);
+                    Pen redPen = new Pen(Color.Red, 3);
+                    int x = displayFrame.Width / 2;
+                    g.DrawLine(redPen, x, 0, x, displayFrame.Height);
                 }
 
                 if (_isClosing || _pbLive.IsDisposed || !_pbLive.IsHandleCreated)
@@ -1333,8 +1373,8 @@ namespace PCB_Inspection_System
                 {
                     StartInfo = new ProcessStartInfo
                     {
-                        FileName = "py",
-                        Arguments = $"-3.11 \"{serverPy}\"",
+                        FileName = "python",
+                        Arguments = $"\"{serverPy}\"",
                         WorkingDirectory = Path.GetDirectoryName(serverPy),
                         UseShellExecute = false,
                         CreateNoWindow = true
@@ -1390,29 +1430,43 @@ namespace PCB_Inspection_System
         private async Task OnModelChangedAsync()
         {
             if (_cbModel.SelectedItem == null) return;
+
             string selectedFolder = _cbModel.SelectedItem.ToString() ?? "";
             if (string.IsNullOrWhiteSpace(selectedFolder)) return;
 
             string app = AppDomain.CurrentDomain.BaseDirectory;
-            string source = Path.Combine(app, "Data", selectedFolder, "best.pt");
+            string sourceDir = Path.Combine(app, "Data", selectedFolder);
             string targetDir = Path.Combine(app, "AI_Server");
-            string target = Path.Combine(targetDir, "best.pt");
 
             try
             {
-                if (!File.Exists(source))
+                string bestModel = Path.Combine(sourceDir, "best.pt");
+
+                // 1. Kiểm tra file model bắt buộc
+                if (!File.Exists(bestModel))
                 {
-                    LogError($"Không tìm thấy best.pt trong: {selectedFolder}");
+                    LogError("Không tìm thấy mô hình AI, vui lòng kiểm tra lại");
                     return;
                 }
 
+                // 2. Tạo thư mục đích nếu chưa có
                 Directory.CreateDirectory(targetDir);
-                File.Copy(source, target, true);
+
+                // 3. Copy toàn bộ file
+                foreach (var file in Directory.GetFiles(sourceDir))
+                {
+                    string fileName = Path.GetFileName(file);
+                    string destFile = Path.Combine(targetDir, fileName);
+
+                    // overwrite = true -> ghi đè file cũ
+                    File.Copy(file, destFile, true);
+                }
 
                 SetTopProgress($"Reloading model: {selectedFolder}...", indeterminate: true);
-                LogInfo($"Copied best.pt from {selectedFolder} → AI_Server");
+                LogInfo($"Copied all files from {selectedFolder} → AI_Server");
 
                 using var resp = await _http.PostAsync("http://127.0.0.1:8000/reload_model", null);
+
                 if (resp.IsSuccessStatusCode)
                 {
                     SetTopProgress($"Model set: {selectedFolder}", indeterminate: false, value: 0);
@@ -1428,6 +1482,46 @@ namespace PCB_Inspection_System
             {
                 SetTopProgress("Model error", indeterminate: false, value: 0);
                 LogError("Model switch error: " + ex.Message);
+            }
+            var param_path = Path.Combine(app, "AI_Server", "camera_parameter.txt");
+            if (!File.Exists(param_path))
+            {
+                LogError("Không thấy AI_Server/camera_parameter.txt");
+                return;
+            }
+            else
+            {
+                try
+                {
+                    string[] lines = File.ReadAllLines(param_path);
+                    int width = 0, height = 0;
+                    int total_object = 0;
+                    if (int.TryParse(lines[0], out width) && int.TryParse(lines[1], out height))
+                    {
+                        LogInfo($"Camera parameters - Width: {width}, Height: {height}");
+                        StopCamera();
+                        StartCamera(width, height);
+                    }
+                    else{
+                        LogError("Invalid camera parameters in camera_parameter.txt");
+                    }
+                    if(int.TryParse(lines[2], out total_object)){
+                        total_objects_detected = total_object;
+                        LogInfo($"Camera parameter - Total Object: {total_object}");
+                    }
+                    if(lines.Count() >= 5 && lines[4] == "lr")
+                    {
+                        isLRimage = true;
+                    }
+                    else
+                    {
+                        isLRimage = false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogError("Error reading camera_parameter.txt: " + ex.Message);
+                }
             }
         }
 
@@ -1471,6 +1565,22 @@ namespace PCB_Inspection_System
                     LogError("Detect trả về rỗng / image_base64 empty.");
                     return;
                 }
+                if (result.ok_count + result.ng_count != total_objects_detected)
+                {
+                    for (int i = 0; i < 3; i++)
+                    {
+                        SetTopProgress($"Re-detecting... Attempt {i + 2}/3", indeterminate: true);
+                        LogInfo($"Số lượng đối tượng phát hiện không đúng (OK={result.ok_count} NG={result.ng_count}), thử lại lần {i + 2}/3...");
+                        result = await DetectFromBitmapAsync(safeFrame);
+                        if (result != null && result.ok_count + result.ng_count == total_objects_detected)
+                            break;
+                    }
+                }
+                if (result.ok_count + result.ng_count != total_objects_detected){
+                    MessageBox.Show($"Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    _isDetecting = false;
+                    return;
+                }
 
                 _lbOk.Text = result.ok_count.ToString();
                 _lbNg.Text = result.ng_count.ToString();
@@ -1505,6 +1615,96 @@ namespace PCB_Inspection_System
             }
         }
 
+        private async Task DetectLRAsync()
+        {
+            if (_isDetecting)
+            {
+                LogInfo("Detect đang chạy, vui lòng đợi...");
+                return;
+            }
+
+            Bitmap? safeFrame = null;
+            lock (_frameLock)
+            {
+                if (_currentFrame != null)
+                    safeFrame = CopyBitmap(_currentFrame);
+            }
+
+            if (safeFrame == null)
+            {
+                LogError("Chưa có frame từ camera.");
+                return;
+            }
+
+            DisableRightControls(true);
+            var modelName = _cbModel.SelectedItem?.ToString() ?? "-";
+            var ts = DateTime.Now;
+            var sw = Stopwatch.StartNew();
+
+            try
+            {
+                _isDetecting = true;
+                EnterDetectedMode();
+                SetTopProgress("Detecting...", indeterminate: true);
+                LogInfo($"Detect started. Model={modelName}");
+
+                var result = await DetectLRFromBitmapAsync(safeFrame);
+                if (result == null)
+                {
+                    SetTopProgress("Detect finished (no result)", indeterminate: false, value: 0);
+                    LogError("Detect trả về rỗng / image_base64 empty.");
+                    return;
+                }
+                if (result.right_ok + result.right_ng + result.left_ok + result.left_ng != total_objects_detected)
+                {
+                    for (int i = 0; i < 3; i++)
+                    {
+                        SetTopProgress($"Re-detecting... Attempt {i + 2}/3", indeterminate: true);
+                        //LogInfo($"Số lượng đối tượng phát hiện không đúng (OK={result.ok_count} NG={result.ng_count}), thử lại lần {i + 2}/3...");
+                        result = await DetectLRFromBitmapAsync(safeFrame);
+                        if (result != null && result.right_ok + result.right_ng + result.left_ok + result.left_ng != total_objects_detected)
+                            break;
+                    }
+                }
+                //if (result.right_ok_count + result.right_ng_count + result.left_ok_count + result.left_ng_count != total_objects_detected)
+                //{
+                //    MessageBox.Show($"Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                //    _isDetecting = false;
+                //    return;
+                //}
+                MessageBox.Show($"Kết quả phát hiện:\n\nBên trái: OK={result.left_ok} NG={result.left_ng}\nBên phải: OK={result.right_ok} NG={result.right_ng}", "Kết quả Detect", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                //_lbOk.Text = result.ok_count.ToString();
+                //_lbNg.Text = result.ng_count.ToString();
+
+                //_totalOk += result.ok_count;
+                //_totalNg += result.ng_count;
+                _lbTotalOk.Text = _totalOk.ToString();
+                _lbTotalNg.Text = _totalNg.ToString();
+
+                sw.Stop();
+                AddHistoryRow(new DetectHistoryRow
+                {
+                    //Timestamp = ts,
+                    //Model = modelName,
+                    //OK = result.ok_count,
+                    //NG = result.ng_count,
+                });
+
+                //SetTopProgress($"Done • OK {result.ok_count} • NG {result.ng_count}", indeterminate: false, value: 100);
+                //LogOk($"Detect done. Model={modelName} OK={result.ok_count} NG={result.ng_count} ({sw.ElapsedMilliseconds} ms)");
+            }
+            catch (Exception ex)
+            {
+                SetTopProgress("Detect error", indeterminate: false, value: 0);
+                LogError(ex.Message);
+            }
+            finally
+            {
+                _isDetecting = false;
+                DisableRightControls(false);
+                safeFrame.Dispose();
+            }
+        }
         private async Task<DetectResult?> DetectFromBitmapAsync(Bitmap frame)
         {
             using var ms = new MemoryStream();
@@ -1524,6 +1724,40 @@ namespace PCB_Inspection_System
             }
 
             var result = JsonSerializer.Deserialize<DetectResult>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (result == null || string.IsNullOrWhiteSpace(result.image_base64))
+                return null;
+
+            byte[] bytes = Convert.FromBase64String(result.image_base64);
+            using var ms2 = new MemoryStream(bytes);
+            using var tmp = new Bitmap(ms2);
+            var oldImg = _pbResult.Image;
+            _pbResult.Image = new Bitmap(tmp);
+            oldImg?.Dispose();
+            return result;
+        }
+        private async Task<DetectResultLR?> DetectLRFromBitmapAsync(Bitmap frame)
+        {
+            using var ms = new MemoryStream();
+            frame.Save(ms, ImageFormat.Jpeg);
+            ms.Position = 0;
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(ms.ToArray()), "file", "frame.jpg");
+
+            using var resp = await _http.PostAsync("http://127.0.0.1:8000/detect_lr", form);
+            var json = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                LogError("Detect HTTP error: " + resp.StatusCode);
+                return null;
+            }
+
+            var result = JsonSerializer.Deserialize<DetectResultLR>(json, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });
@@ -1801,6 +2035,14 @@ namespace PCB_Inspection_System
         {
             public int ok_count { get; set; }
             public int ng_count { get; set; }
+            public string image_base64 { get; set; } = "";
+        }
+        public sealed class DetectResultLR
+        {
+            public int left_ok { get; set; }
+            public int left_ng { get; set; }
+            public int right_ok { get; set; }
+            public int right_ng { get; set; }
             public string image_base64 { get; set; } = "";
         }
 
