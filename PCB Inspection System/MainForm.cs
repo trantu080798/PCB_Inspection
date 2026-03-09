@@ -84,6 +84,7 @@ namespace PCB_Inspection_System
         private readonly Stopwatch _viewAnimSw = new();
         private Rectangle _liveFrom, _liveTo, _resFrom, _resTo;
         private bool _hideResultAfterAnim;
+        private int total_objects_detected;
 
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
@@ -1166,7 +1167,7 @@ namespace PCB_Inspection_System
             return new Rectangle(x, y, w, h);
         }
 
-        private void StartCamera()
+        private void StartCamera(int width = 1280, int height = 720)
         {
             try
             {
@@ -1181,7 +1182,7 @@ namespace PCB_Inspection_System
                 _videoSource = new VideoCaptureDevice(_videoDevices[0].MonikerString);
                 foreach (var cap in _videoSource.VideoCapabilities)
                 {
-                    if (cap.FrameSize.Width == 2560 && cap.FrameSize.Height == 1440)
+                    if (cap.FrameSize.Width == width && cap.FrameSize.Height == height)
                     {
                         _videoSource.VideoResolution = cap;
                         break;
@@ -1333,8 +1334,8 @@ namespace PCB_Inspection_System
                 {
                     StartInfo = new ProcessStartInfo
                     {
-                        FileName = "py",
-                        Arguments = $"-3.11 \"{serverPy}\"",
+                        FileName = "python",
+                        Arguments = $"\"{serverPy}\"",
                         WorkingDirectory = Path.GetDirectoryName(serverPy),
                         UseShellExecute = false,
                         CreateNoWindow = true
@@ -1390,29 +1391,43 @@ namespace PCB_Inspection_System
         private async Task OnModelChangedAsync()
         {
             if (_cbModel.SelectedItem == null) return;
+
             string selectedFolder = _cbModel.SelectedItem.ToString() ?? "";
             if (string.IsNullOrWhiteSpace(selectedFolder)) return;
 
             string app = AppDomain.CurrentDomain.BaseDirectory;
-            string source = Path.Combine(app, "Data", selectedFolder, "best.pt");
+            string sourceDir = Path.Combine(app, "Data", selectedFolder);
             string targetDir = Path.Combine(app, "AI_Server");
-            string target = Path.Combine(targetDir, "best.pt");
 
             try
             {
-                if (!File.Exists(source))
+                string bestModel = Path.Combine(sourceDir, "best.pt");
+
+                // 1. Kiểm tra file model bắt buộc
+                if (!File.Exists(bestModel))
                 {
-                    LogError($"Không tìm thấy best.pt trong: {selectedFolder}");
+                    LogError("Không tìm thấy mô hình AI, vui lòng kiểm tra lại");
                     return;
                 }
 
+                // 2. Tạo thư mục đích nếu chưa có
                 Directory.CreateDirectory(targetDir);
-                File.Copy(source, target, true);
+
+                // 3. Copy toàn bộ file
+                foreach (var file in Directory.GetFiles(sourceDir))
+                {
+                    string fileName = Path.GetFileName(file);
+                    string destFile = Path.Combine(targetDir, fileName);
+
+                    // overwrite = true -> ghi đè file cũ
+                    File.Copy(file, destFile, true);
+                }
 
                 SetTopProgress($"Reloading model: {selectedFolder}...", indeterminate: true);
-                LogInfo($"Copied best.pt from {selectedFolder} → AI_Server");
+                LogInfo($"Copied all files from {selectedFolder} → AI_Server");
 
                 using var resp = await _http.PostAsync("http://127.0.0.1:8000/reload_model", null);
+
                 if (resp.IsSuccessStatusCode)
                 {
                     SetTopProgress($"Model set: {selectedFolder}", indeterminate: false, value: 0);
@@ -1428,6 +1443,55 @@ namespace PCB_Inspection_System
             {
                 SetTopProgress("Model error", indeterminate: false, value: 0);
                 LogError("Model switch error: " + ex.Message);
+            }
+            var param_path = Path.Combine(app, "AI_Server", "camera_parameter.txt");
+            if (!File.Exists(param_path))
+            {
+                LogError("Không thấy AI_Server/camera_parameter.txt");
+                return;
+            }
+            else
+            {
+                try
+                {
+                    string[] lines = File.ReadAllLines(param_path);
+                    int width = 0, height = 0;
+                    int total_object = 0;
+                    if (int.TryParse(lines[0], out width) && int.TryParse(lines[1], out height))
+                    {
+                        LogInfo($"Camera parameters - Width: {width}, Height: {height}");
+                        StopCamera();
+                        StartCamera(width, height);
+                    }
+                    else{
+                        LogError("Invalid camera parameters in camera_parameter.txt");
+                    }
+                    if(int.TryParse(lines[2], out total_object)){
+                        total_objects_detected = total_object;
+                        LogInfo($"Camera parameter - Total Object: {total_object}");
+                    }
+                    //foreach (var line in lines)
+                    //{
+                    //    var parts = line.Split('=');
+                    //    if (parts.Length == 2)
+                    //    {
+                    //        string key = parts[0].Trim();
+                    //        string value = parts[1].Trim();
+                    //        if (key.Equals("exposure", StringComparison.OrdinalIgnoreCase))
+                    //        {
+                    //            LogInfo($"Camera parameter - Exposure: {value}");
+                    //        }
+                    //        else if (key.Equals("gain", StringComparison.OrdinalIgnoreCase))
+                    //        {
+                    //            LogInfo($"Camera parameter - Gain: {value}");
+                    //        }
+                    //    }
+                    //}
+                }
+                catch (Exception ex)
+                {
+                    LogError("Error reading camera_parameter.txt: " + ex.Message);
+                }
             }
         }
 
@@ -1469,6 +1533,11 @@ namespace PCB_Inspection_System
                 {
                     SetTopProgress("Detect finished (no result)", indeterminate: false, value: 0);
                     LogError("Detect trả về rỗng / image_base64 empty.");
+                    return;
+                }
+                if(result.ok_count + result.ng_count != total_objects_detected){
+                    MessageBox.Show($"Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test. Vui lòng kiểm tra lại.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    _isDetecting = false;
                     return;
                 }
 

@@ -20,7 +20,7 @@ CAMERA_PARAM_PATH = "camera_params.npz"
 NG_CLASS_INDEX = 0
 OK_CLASS_INDEX = 1
 IMGZ=1280
-CONF=0.6
+CONF=0.4
 IOU = 0.3
 # =============================
 # INIT
@@ -84,7 +84,7 @@ async def detect_capture(request: CaptureRequest):
         img_bytes = base64.b64decode(request.image_base64)
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
+        print("IMG SHAPE:", img.shape)
         if img is None:
             return JSONResponse(
                 status_code=400,
@@ -105,6 +105,7 @@ async def detect_capture(request: CaptureRequest):
             imgsz=IMGZ,
             conf=CONF,
             iou = IOU,
+            agnostic_nms=True,
             verbose=False
         )[0]
 
@@ -159,35 +160,17 @@ async def detect(file: UploadFile = File(...)):
         # UNDISTORT HERE
         # =============================
         if camera_matrix is not None:
-            h, w = img.shape[:2]
-
-            newcameramtx, roi = cv2.getOptimalNewCameraMatrix(
-                camera_matrix,
-                dist_coeffs,
-                (w, h),
-                1,
-                (w, h)
-            )
-
-            img = cv2.undistort(
-                img,
-                camera_matrix,
-                dist_coeffs,
-                None,
-                newcameramtx
-            )
-
-            x, y, w, h = roi
-            img = img[y:y+h, x:x+w]
+            img = cv2.undistort(img, camera_matrix, dist_coeffs)
 
         # =============================
         # YOLO INFERENCE
         # =============================
         results = model.predict(
-            img,
-            imgsz=IMGZ,
+            source=img,
+            imgsz=1280,
             conf=CONF,
-            iou = IOU,
+            iou=IOU,
+            agnostic_nms=True,
             verbose=False
         )[0]
 
