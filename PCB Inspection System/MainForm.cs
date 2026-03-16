@@ -1244,6 +1244,7 @@ namespace PCB_Inspection_System
             try
             {
                 raw = (Bitmap)e.Frame.Clone();
+                raw.RotateFlip(RotateFlipType.Rotate180FlipNone);
                 storeCopy = (Bitmap)raw.Clone();
 
                 lock (_frameLock)
