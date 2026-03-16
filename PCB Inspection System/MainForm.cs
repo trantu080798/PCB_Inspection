@@ -34,6 +34,10 @@ namespace PCB_Inspection_System
 
         private long _totalOk;
         private long _totalNg;
+        private long _totalLeftOk;
+        private long _totalLeftNg;
+        private long _totalRightOk;
+        private long _totalRightNg;
 
         private readonly BindingList<DetectHistoryRow> _history = new();
         private DataGridView _gvHistory = null!;
@@ -67,18 +71,31 @@ namespace PCB_Inspection_System
         private PictureBox _pbLive = null!;
         private PictureBox _pbResult = null!;
         private bool _detectedMode;
+        private bool _serverReady;
 
         private RoundedPanel _rightCard = null!;
+        private TableLayoutPanel _rightPanelGrid = null!;
+        private TableLayoutPanel _totalHistoryWrap = null!;
         private ComboBox _cbModel = null!;
         private ModernButton _btnRestartServer = null!;
         private ModernButton _btnDetect = null!;
         private ModernButton _btnRefresh = null!;
         private Label _lbHistoryEmpty = null!;
+        private TableLayoutPanel _currentStatsHost = null!;
+        private TableLayoutPanel _totalStatsHost = null!;
 
         private Label _lbOk = null!;
         private Label _lbNg = null!;
+        private Label _lbLeftOk = null!;
+        private Label _lbLeftNg = null!;
+        private Label _lbRightOk = null!;
+        private Label _lbRightNg = null!;
         private Label _lbTotalOk = null!;
         private Label _lbTotalNg = null!;
+        private Label _lbTotalLeftOk = null!;
+        private Label _lbTotalLeftNg = null!;
+        private Label _lbTotalRightOk = null!;
+        private Label _lbTotalRightNg = null!;
 
         private System.Windows.Forms.Timer? _viewAnimTimer;
         private readonly Stopwatch _viewAnimSw = new();
@@ -156,6 +173,8 @@ namespace PCB_Inspection_System
                 LoadModels();
 
                 await RestartServerAsync();
+                if (_serverReady && _cbModel.Items.Count > 0 && _cbModel.SelectedIndex >= 0)
+                    await OnModelChangedAsync();
                 SetTopProgress("Ready", indeterminate: false, value: 0);
             };
         }
@@ -186,7 +205,7 @@ namespace PCB_Inspection_System
         private async Task RunDetectShortcutAsync()
         {
             if (!_isDetecting)
-                if(isLRimage)
+                if (isLRimage)
                     await DetectLRAsync();
                 else
                     await DetectAsync();
@@ -628,7 +647,7 @@ namespace PCB_Inspection_System
             _rightCard.MinimumSize = new Size(320, 0);
             _root.Controls.Add(_rightCard, 1, 1);
 
-            var grid = new TableLayoutPanel
+            _rightPanelGrid = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
@@ -637,19 +656,19 @@ namespace PCB_Inspection_System
                 Margin = new Padding(0),
                 Padding = new Padding(0)
             };
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 18f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 44f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 112f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-            _rightCard.Controls.Add(grid);
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 18f));
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 44f));
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f));
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 170f));
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f));
+            _rightPanelGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            _rightCard.Controls.Add(_rightPanelGrid);
 
-            grid.Controls.Add(new Label
+            _rightPanelGrid.Controls.Add(new Label
             {
                 Dock = DockStyle.Fill,
                 Text = "Model",
@@ -684,7 +703,7 @@ namespace PCB_Inspection_System
             };
             _cbModel.SelectedIndexChanged += async (_, __) => await OnModelChangedAsync();
             comboHost.Controls.Add(_cbModel);
-            grid.Controls.Add(comboHost, 0, 1);
+            _rightPanelGrid.Controls.Add(comboHost, 0, 1);
 
             _btnRestartServer = new ModernButton
             {
@@ -699,7 +718,7 @@ namespace PCB_Inspection_System
                 Margin = new Padding(0)
             };
             _btnRestartServer.Click += async (_, __) => await RestartServerAsync();
-            grid.Controls.Add(_btnRestartServer, 0, 3);
+            _rightPanelGrid.Controls.Add(_btnRestartServer, 0, 3);
 
             _btnDetect = new ModernButton
             {
@@ -720,7 +739,7 @@ namespace PCB_Inspection_System
                 else
                     await DetectAsync();
             };
-            grid.Controls.Add(_btnDetect, 0, 5);
+            _rightPanelGrid.Controls.Add(_btnDetect, 0, 5);
 
             var cardCurrent = Card(Theme.Surface2);
             cardCurrent.CornerRadius = 15;
@@ -750,28 +769,17 @@ namespace PCB_Inspection_System
                 Margin = new Padding(0)
             }, 0, 0);
 
-            var curStats = new TableLayoutPanel
+            _currentStatsHost = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 1,
                 BackColor = Color.Transparent,
                 Margin = new Padding(0),
                 Padding = new Padding(0)
             };
-            curStats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
-            curStats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
 
-            var curOk = MetricChip("OK", Theme.Ok, out _lbOk);
-            var curNg = MetricChip("NG", Theme.Ng, out _lbNg);
-            curOk.Margin = new Padding(0, 0, 6, 0);
-            curNg.Margin = new Padding(6, 0, 0, 0);
-            curStats.Controls.Add(curOk, 0, 0);
-            curStats.Controls.Add(curNg, 1, 0);
-
-            curWrap.Controls.Add(curStats, 0, 1);
+            curWrap.Controls.Add(_currentStatsHost, 0, 1);
             cardCurrent.Controls.Add(curWrap);
-            grid.Controls.Add(cardCurrent, 0, 7);
+            _rightPanelGrid.Controls.Add(cardCurrent, 0, 7);
 
             var cardTotalHistory = Card(Theme.Surface2);
             cardTotalHistory.CornerRadius = 15;
@@ -779,7 +787,7 @@ namespace PCB_Inspection_System
             cardTotalHistory.Dock = DockStyle.Fill;
             cardTotalHistory.Margin = new Padding(0);
 
-            var wrap = new TableLayoutPanel
+            _totalHistoryWrap = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
@@ -788,12 +796,12 @@ namespace PCB_Inspection_System
                 Margin = new Padding(0),
                 Padding = new Padding(0)
             };
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 32f));
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 76f));
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 12f));
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 1f));
-            wrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            _totalHistoryWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 32f));
+            _totalHistoryWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
+            _totalHistoryWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 76f));
+            _totalHistoryWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 12f));
+            _totalHistoryWrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 1f));
+            _totalHistoryWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
             var header = new TableLayoutPanel
             {
@@ -833,24 +841,13 @@ namespace PCB_Inspection_System
             _btnRefresh.Click += (_, __) => ResetTotalsAndHistory();
             header.Controls.Add(_btnRefresh, 1, 0);
 
-            var chips = new TableLayoutPanel
+            _totalStatsHost = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 1,
                 BackColor = Color.Transparent,
                 Margin = new Padding(0),
                 Padding = new Padding(0, 2, 0, 0)
             };
-            chips.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
-            chips.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
-
-            var totOk = MetricChip("Total OK", Theme.Ok, out _lbTotalOk);
-            var totNg = MetricChip("Total NG", Theme.Ng, out _lbTotalNg);
-            totOk.Margin = new Padding(0, 0, 8, 0);
-            totNg.Margin = new Padding(8, 0, 0, 0);
-            chips.Controls.Add(totOk, 0, 0);
-            chips.Controls.Add(totNg, 1, 0);
 
             var divider = new Panel
             {
@@ -919,15 +916,17 @@ namespace PCB_Inspection_System
             _history.ListChanged += (_, __) => UpdateHistoryEmptyState();
             UpdateHistoryEmptyState();
 
-            wrap.Controls.Add(header, 0, 0);
-            wrap.Controls.Add(new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) }, 0, 1);
-            wrap.Controls.Add(chips, 0, 2);
-            wrap.Controls.Add(new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) }, 0, 3);
-            wrap.Controls.Add(divider, 0, 4);
-            wrap.Controls.Add(historyHost, 0, 5);
+            _totalHistoryWrap.Controls.Add(header, 0, 0);
+            _totalHistoryWrap.Controls.Add(new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) }, 0, 1);
+            _totalHistoryWrap.Controls.Add(_totalStatsHost, 0, 2);
+            _totalHistoryWrap.Controls.Add(new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) }, 0, 3);
+            _totalHistoryWrap.Controls.Add(divider, 0, 4);
+            _totalHistoryWrap.Controls.Add(historyHost, 0, 5);
 
-            cardTotalHistory.Controls.Add(wrap);
-            grid.Controls.Add(cardTotalHistory, 0, 9);
+            cardTotalHistory.Controls.Add(_totalHistoryWrap);
+            _rightPanelGrid.Controls.Add(cardTotalHistory, 0, 9);
+
+            ApplyDetectModeUi(resetValues: true, reconfigureHistory: false);
         }
 
         private RoundedPanel MetricChip(string title, Color valueColor, out Label valueLabel)
@@ -941,7 +940,7 @@ namespace PCB_Inspection_System
                 CornerRadius = 14,
                 Padding = new Padding(14, 10, 14, 10),
                 Margin = new Padding(0),
-                MinimumSize = new Size(0, 72)
+                MinimumSize = new Size(0, 58)
             };
 
             var g = new TableLayoutPanel
@@ -972,7 +971,7 @@ namespace PCB_Inspection_System
                 Dock = DockStyle.Fill,
                 Text = "0",
                 ForeColor = valueColor,
-                Font = new Font("Segoe UI Semibold", 15.5f),
+                Font = new Font("Segoe UI Semibold", 12.5f),
                 TextAlign = ContentAlignment.MiddleLeft,
                 AutoSize = false,
                 Margin = new Padding(0),
@@ -983,6 +982,295 @@ namespace PCB_Inspection_System
             chip.Controls.Add(g);
             return chip;
         }
+
+
+        private void ApplyDetectModeUi(bool resetValues, bool reconfigureHistory = true)
+        {
+            BuildCurrentMetricsLayout();
+            BuildTotalMetricsLayout();
+            ApplyRightPanelMetricSizing();
+            UpdateDetectButtonText();
+
+            if (reconfigureHistory && _gvHistory != null)
+            {
+                ConfigureHistoryGrid(_gvHistory);
+                _gvHistory.DataSource = null;
+                _gvHistory.DataSource = _history;
+            }
+
+            if (resetValues)
+                ResetMetricLabelsOnly();
+        }
+
+        private void BuildCurrentMetricsLayout()
+        {
+            if (_currentStatsHost == null) return;
+
+            RebuildMetricHost(_currentStatsHost, isLRimage,
+                () =>
+                {
+                    var ok = MetricChip("OK", Theme.Ok, out _lbOk);
+                    var ng = MetricChip("NG", Theme.Ng, out _lbNg);
+
+                    ok.Margin = new Padding(0, 0, 6, 0);
+                    ng.Margin = new Padding(6, 0, 0, 0);
+
+                    return new (Control control, int column, int row)[]
+                    {
+                (ok, 0, 0),
+                (ng, 1, 0)
+                    };
+                },
+                () =>
+                {
+                    var leftOk = MetricChip("LEFT OK", Theme.Ok, out _lbLeftOk);
+                    var leftNg = MetricChip("LEFT NG", Theme.Ng, out _lbLeftNg);
+                    var rightOk = MetricChip("RIGHT OK", Theme.Ok, out _lbRightOk);
+                    var rightNg = MetricChip("RIGHT NG", Theme.Ng, out _lbRightNg);
+
+            
+                    leftOk.Margin = new Padding(0, 0, 6, 6);
+                    leftNg.Margin = new Padding(0, 6, 6, 0);
+
+               
+                    rightOk.Margin = new Padding(6, 0, 0, 6);
+                    rightNg.Margin = new Padding(6, 6, 0, 0);
+
+                    return new (Control control, int column, int row)[]
+                    {
+                (leftOk, 0, 0),
+                (leftNg, 0, 1),
+                (rightOk, 1, 0),
+                (rightNg, 1, 1)
+                    };
+                });
+        }
+
+        private void BuildTotalMetricsLayout()
+        {
+            if (_totalStatsHost == null) return;
+
+            RebuildMetricHost(_totalStatsHost, isLRimage,
+                () =>
+                {
+                    var ok = MetricChip("Total OK", Theme.Ok, out _lbTotalOk);
+                    var ng = MetricChip("Total NG", Theme.Ng, out _lbTotalNg);
+
+                    ok.Margin = new Padding(0, 0, 8, 0);
+                    ng.Margin = new Padding(8, 0, 0, 0);
+
+                    return new (Control control, int column, int row)[]
+                    {
+                (ok, 0, 0),
+                (ng, 1, 0)
+                    };
+                },
+                () =>
+                {
+                    var leftOk = MetricChip("Left Total OK", Theme.Ok, out _lbTotalLeftOk);
+                    var leftNg = MetricChip("Left Total NG", Theme.Ng, out _lbTotalLeftNg);
+                    var rightOk = MetricChip("Right Total OK", Theme.Ok, out _lbTotalRightOk);
+                    var rightNg = MetricChip("Right Total NG", Theme.Ng, out _lbTotalRightNg);
+
+                    // cột trái = LEFT
+                    leftOk.Margin = new Padding(0, 0, 8, 6);
+                    leftNg.Margin = new Padding(0, 6, 8, 0);
+
+                    // cột phải = RIGHT
+                    rightOk.Margin = new Padding(8, 0, 0, 6);
+                    rightNg.Margin = new Padding(8, 6, 0, 0);
+
+                    return new (Control control, int column, int row)[]
+                    {
+                (leftOk, 0, 0),
+                (leftNg, 0, 1),
+                (rightOk, 1, 0),
+                (rightNg, 1, 1)
+                    };
+                });
+        }
+
+        private void RebuildMetricHost(
+            TableLayoutPanel host,
+            bool lrMode,
+            Func<(Control control, int column, int row)[]> buildSingle,
+            Func<(Control control, int column, int row)[]> buildLr)
+        {
+            host.SuspendLayout();
+            DisposeChildren(host);
+            host.Controls.Clear();
+            host.ColumnStyles.Clear();
+            host.RowStyles.Clear();
+            host.ColumnCount = 2;
+            host.RowCount = lrMode ? 2 : 1;
+            host.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            host.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+
+            if (lrMode)
+            {
+                host.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));
+                host.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));
+                foreach (var item in buildLr())
+                    host.Controls.Add(item.control, item.column, item.row);
+            }
+            else
+            {
+                host.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+                foreach (var item in buildSingle())
+                    host.Controls.Add(item.control, item.column, item.row);
+            }
+
+            host.ResumeLayout(true);
+        }
+
+        private static void DisposeChildren(Control parent)
+        {
+            foreach (Control child in parent.Controls.Cast<Control>().ToArray())
+                child.Dispose();
+        }
+
+        private void ApplyRightPanelMetricSizing()
+        {
+            bool compact = ClientSize.Width < 1500 || ClientSize.Height < 860;
+            float currentHeight = isLRimage ? (compact ? 148f : 156f) : 112f;
+            float totalHeight = isLRimage ? (compact ? 148f : 156f) : 76f;
+
+            if (_rightPanelGrid != null && _rightPanelGrid.RowStyles.Count > 7)
+                _rightPanelGrid.RowStyles[7].Height = currentHeight;
+
+            if (_totalHistoryWrap != null && _totalHistoryWrap.RowStyles.Count > 2)
+                _totalHistoryWrap.RowStyles[2].Height = totalHeight;
+        }
+
+        private void UpdateDetectButtonText()
+        {
+            if (_btnDetect != null)
+                _btnDetect.Text = isLRimage ? "Detect LR" : "Detect";
+        }
+
+        private void ResetMetricLabelsOnly()
+        {
+            SetLabelText(_lbOk, 0);
+            SetLabelText(_lbNg, 0);
+            SetLabelText(_lbLeftOk, 0);
+            SetLabelText(_lbLeftNg, 0);
+            SetLabelText(_lbRightOk, 0);
+            SetLabelText(_lbRightNg, 0);
+            SetLabelText(_lbTotalOk, 0);
+            SetLabelText(_lbTotalNg, 0);
+            SetLabelText(_lbTotalLeftOk, 0);
+            SetLabelText(_lbTotalLeftNg, 0);
+            SetLabelText(_lbTotalRightOk, 0);
+            SetLabelText(_lbTotalRightNg, 0);
+        }
+
+        private static void SetLabelText(Label? label, long value)
+        {
+            if (label != null)
+                label.Text = value.ToString();
+        }
+
+        private void ResetDetectState(bool clearHistory, bool clearResultPreview, string logMessage)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => ResetDetectState(clearHistory, clearResultPreview, logMessage)));
+                return;
+            }
+
+            _totalOk = 0;
+            _totalNg = 0;
+            _totalLeftOk = 0;
+            _totalLeftNg = 0;
+            _totalRightOk = 0;
+            _totalRightNg = 0;
+
+            ResetMetricLabelsOnly();
+
+            if (clearHistory)
+                _history.Clear();
+
+            if (clearResultPreview && _pbResult != null)
+            {
+                var oldImg = _pbResult.Image;
+                _pbResult.Image = null;
+                oldImg?.Dispose();
+            }
+
+            _detectedMode = false;
+            ApplyViewportLayout(animated: false);
+            UpdateHistoryEmptyState();
+            LogInfo(logMessage);
+        }
+
+        private bool TryReadCameraParameters(out int width, out int height, out int totalObject, out bool lrMode)
+        {
+            width = 0;
+            height = 0;
+            totalObject = 0;
+            lrMode = false;
+
+            string app = AppDomain.CurrentDomain.BaseDirectory;
+            string paramPath = Path.Combine(app, "AI_Server", "camera_parameter.txt");
+            if (!File.Exists(paramPath))
+            {
+                LogError("Không thấy AI_Server/camera_parameter.txt");
+                return false;
+            }
+
+            try
+            {
+                string[] lines = File.ReadAllLines(paramPath);
+                if (lines.Length < 3)
+                {
+                    LogError("camera_parameter.txt không đủ dữ liệu.");
+                    return false;
+                }
+
+                if (!int.TryParse(lines[0], out width) || !int.TryParse(lines[1], out height))
+                {
+                    LogError("Invalid camera width/height in camera_parameter.txt");
+                    return false;
+                }
+
+                if (!int.TryParse(lines[2], out totalObject))
+                {
+                    LogError("Invalid total object in camera_parameter.txt");
+                    return false;
+                }
+
+                lrMode = lines.Length >= 5 && string.Equals(lines[4].Trim(), "lr", StringComparison.OrdinalIgnoreCase);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogError("Error reading camera_parameter.txt: " + ex.Message);
+                return false;
+            }
+        }
+
+        private void ApplyModelParameters(int width, int height, int totalObject, bool lrMode)
+        {
+            bool modeChanged = isLRimage != lrMode;
+            isLRimage = lrMode;
+            total_objects_detected = totalObject;
+
+            LogInfo($"Camera parameters - Width: {width}, Height: {height}");
+            LogInfo($"Camera parameter - Total Object: {totalObject}");
+            LogInfo($"Detect mode: {(isLRimage ? "LEFT/RIGHT" : "NORMAL")}");
+
+            StopCamera();
+            StartCamera(width, height);
+
+            ApplyDetectModeUi(resetValues: true);
+            ResetDetectState(clearHistory: true, clearResultPreview: true, logMessage: "Model changed → cleared previous detect data.");
+
+            if (modeChanged)
+                LogInfo($"UI switched to {(isLRimage ? "LEFT/RIGHT" : "NORMAL")} mode.");
+        }
+
+        private static int SumLr(DetectResultLR result)
+            => result.left_ok + result.left_ng + result.right_ok + result.right_ng;
 
         private void BuildLogPanel()
         {
@@ -1200,7 +1488,7 @@ namespace PCB_Inspection_System
                     try
                     {
                         string[] lines = File.ReadAllLines(param_path);
-                        if (int.TryParse(lines[3],out int devNum) && devNum >= 0 && devNum < _videoDevices.Count)
+                        if (int.TryParse(lines[3], out int devNum) && devNum >= 0 && devNum < _videoDevices.Count)
                         {
                             device_num = devNum;
                         }
@@ -1262,7 +1550,7 @@ namespace PCB_Inspection_System
                 using (var g = Graphics.FromImage(displayFrame))
                 {
                     g.InterpolationMode = InterpolationMode.Low;
-                    
+
                     g.DrawImage(raw, 0, 0, 640, 360);
                     Pen redPen = new Pen(Color.Red, 3);
                     int x = displayFrame.Width / 2;
@@ -1356,6 +1644,7 @@ namespace PCB_Inspection_System
             try
             {
                 DisableRightControls(true);
+                _serverReady = false;
                 SetTopProgress("Restarting server...", indeterminate: true);
                 LogInfo("Restart AI server...");
 
@@ -1384,11 +1673,13 @@ namespace PCB_Inspection_System
                 _pythonProcess.Start();
 
                 await Task.Delay(1500);
+                _serverReady = true;
                 SetTopProgress("Server ready", indeterminate: false, value: 0);
                 LogOk("Server restarted.");
             }
             catch (Exception ex)
             {
+                _serverReady = false;
                 SetTopProgress("Restart error", indeterminate: false, value: 0);
                 LogError("RestartServer error: " + ex.Message);
             }
@@ -1430,9 +1721,12 @@ namespace PCB_Inspection_System
 
         private async Task OnModelChangedAsync()
         {
+            if (!_serverReady)
+                return;
+
             if (_cbModel.SelectedItem == null) return;
 
-            string selectedFolder = _cbModel.SelectedItem.ToString() ?? "";
+            string selectedFolder = _cbModel.SelectedItem.ToString() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(selectedFolder)) return;
 
             string app = AppDomain.CurrentDomain.BaseDirectory;
@@ -1442,24 +1736,17 @@ namespace PCB_Inspection_System
             try
             {
                 string bestModel = Path.Combine(sourceDir, "best.pt");
-
-                // 1. Kiểm tra file model bắt buộc
                 if (!File.Exists(bestModel))
                 {
                     LogError("Không tìm thấy mô hình AI, vui lòng kiểm tra lại");
                     return;
                 }
 
-                // 2. Tạo thư mục đích nếu chưa có
                 Directory.CreateDirectory(targetDir);
-
-                // 3. Copy toàn bộ file
                 foreach (var file in Directory.GetFiles(sourceDir))
                 {
                     string fileName = Path.GetFileName(file);
                     string destFile = Path.Combine(targetDir, fileName);
-
-                    // overwrite = true -> ghi đè file cũ
                     File.Copy(file, destFile, true);
                 }
 
@@ -1467,62 +1754,28 @@ namespace PCB_Inspection_System
                 LogInfo($"Copied all files from {selectedFolder} → AI_Server");
 
                 using var resp = await _http.PostAsync("http://127.0.0.1:8000/reload_model", null);
-
-                if (resp.IsSuccessStatusCode)
-                {
-                    SetTopProgress($"Model set: {selectedFolder}", indeterminate: false, value: 0);
-                    LogOk($"Model updated: {selectedFolder}");
-                }
-                else
+                if (!resp.IsSuccessStatusCode)
                 {
                     SetTopProgress("Reload model error", indeterminate: false, value: 0);
                     LogError("reload_model failed: " + resp.StatusCode);
+                    return;
                 }
+
+                if (!TryReadCameraParameters(out int width, out int height, out int totalObject, out bool lrMode))
+                {
+                    SetTopProgress("Camera parameter error", indeterminate: false, value: 0);
+                    return;
+                }
+
+                ApplyModelParameters(width, height, totalObject, lrMode);
+
+                SetTopProgress($"Model set: {selectedFolder}", indeterminate: false, value: 0);
+                LogOk($"Model updated: {selectedFolder}");
             }
             catch (Exception ex)
             {
                 SetTopProgress("Model error", indeterminate: false, value: 0);
                 LogError("Model switch error: " + ex.Message);
-            }
-            var param_path = Path.Combine(app, "AI_Server", "camera_parameter.txt");
-            if (!File.Exists(param_path))
-            {
-                LogError("Không thấy AI_Server/camera_parameter.txt");
-                return;
-            }
-            else
-            {
-                try
-                {
-                    string[] lines = File.ReadAllLines(param_path);
-                    int width = 0, height = 0;
-                    int total_object = 0;
-                    if (int.TryParse(lines[0], out width) && int.TryParse(lines[1], out height))
-                    {
-                        LogInfo($"Camera parameters - Width: {width}, Height: {height}");
-                        StopCamera();
-                        StartCamera(width, height);
-                    }
-                    else{
-                        LogError("Invalid camera parameters in camera_parameter.txt");
-                    }
-                    if(int.TryParse(lines[2], out total_object)){
-                        total_objects_detected = total_object;
-                        LogInfo($"Camera parameter - Total Object: {total_object}");
-                    }
-                    if(lines.Count() >= 5 && lines[4] == "lr")
-                    {
-                        isLRimage = true;
-                    }
-                    else
-                    {
-                        isLRimage = false;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogError("Error reading camera_parameter.txt: " + ex.Message);
-                }
             }
         }
 
@@ -1577,19 +1830,20 @@ namespace PCB_Inspection_System
                             break;
                     }
                 }
-                if (result.ok_count + result.ng_count != total_objects_detected){
+                if (result.ok_count + result.ng_count != total_objects_detected)
+                {
                     MessageBox.Show($"Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     _isDetecting = false;
                     return;
                 }
 
-                _lbOk.Text = result.ok_count.ToString();
-                _lbNg.Text = result.ng_count.ToString();
+                SetLabelText(_lbOk, result.ok_count);
+                SetLabelText(_lbNg, result.ng_count);
 
                 _totalOk += result.ok_count;
                 _totalNg += result.ng_count;
-                _lbTotalOk.Text = _totalOk.ToString();
-                _lbTotalNg.Text = _totalNg.ToString();
+                SetLabelText(_lbTotalOk, _totalOk);
+                SetLabelText(_lbTotalNg, _totalNg);
 
                 sw.Stop();
                 AddHistoryRow(new DetectHistoryRow
@@ -1656,43 +1910,58 @@ namespace PCB_Inspection_System
                     LogError("Detect trả về rỗng / image_base64 empty.");
                     return;
                 }
-                if (result.right_ok + result.right_ng + result.left_ok + result.left_ng != total_objects_detected)
+
+                if (SumLr(result) != total_objects_detected)
                 {
                     for (int i = 0; i < 3; i++)
                     {
                         SetTopProgress($"Re-detecting... Attempt {i + 2}/3", indeterminate: true);
-                        //LogInfo($"Số lượng đối tượng phát hiện không đúng (OK={result.ok_count} NG={result.ng_count}), thử lại lần {i + 2}/3...");
+                        LogInfo($"Số lượng đối tượng LR chưa đúng (L:{result.left_ok}/{result.left_ng} - R:{result.right_ok}/{result.right_ng}), thử lại lần {i + 2}/3...");
                         result = await DetectLRFromBitmapAsync(safeFrame);
-                        if (result != null && result.right_ok + result.right_ng + result.left_ok + result.left_ng != total_objects_detected)
+                        if (result != null && SumLr(result) == total_objects_detected)
                             break;
                     }
                 }
-                //if (result.right_ok_count + result.right_ng_count + result.left_ok_count + result.left_ng_count != total_objects_detected)
-                //{
-                //    MessageBox.Show($"Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                //    _isDetecting = false;
-                //    return;
-                //}
-                MessageBox.Show($"Kết quả phát hiện:\n\nBên trái: OK={result.left_ok} NG={result.left_ng}\nBên phải: OK={result.right_ok} NG={result.right_ng}", "Kết quả Detect", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                //_lbOk.Text = result.ok_count.ToString();
-                //_lbNg.Text = result.ng_count.ToString();
 
-                //_totalOk += result.ok_count;
-                //_totalNg += result.ng_count;
-                _lbTotalOk.Text = _totalOk.ToString();
-                _lbTotalNg.Text = _totalNg.ToString();
+                if (SumLr(result) != total_objects_detected)
+                {
+                    MessageBox.Show("Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    _isDetecting = false;
+                    return;
+                }
+
+                SetLabelText(_lbLeftOk, result.left_ok);
+                SetLabelText(_lbLeftNg, result.left_ng);
+                SetLabelText(_lbRightOk, result.right_ok);
+                SetLabelText(_lbRightNg, result.right_ng);
+
+                _totalLeftOk += result.left_ok;
+                _totalLeftNg += result.left_ng;
+                _totalRightOk += result.right_ok;
+                _totalRightNg += result.right_ng;
+                _totalOk += result.left_ok + result.right_ok;
+                _totalNg += result.left_ng + result.right_ng;
+
+                SetLabelText(_lbTotalLeftOk, _totalLeftOk);
+                SetLabelText(_lbTotalLeftNg, _totalLeftNg);
+                SetLabelText(_lbTotalRightOk, _totalRightOk);
+                SetLabelText(_lbTotalRightNg, _totalRightNg);
 
                 sw.Stop();
                 AddHistoryRow(new DetectHistoryRow
                 {
-                    //Timestamp = ts,
-                    //Model = modelName,
-                    //OK = result.ok_count,
-                    //NG = result.ng_count,
+                    Timestamp = ts,
+                    Model = modelName,
+                    OK = result.left_ok + result.right_ok,
+                    NG = result.left_ng + result.right_ng,
+                    LeftOK = result.left_ok,
+                    LeftNG = result.left_ng,
+                    RightOK = result.right_ok,
+                    RightNG = result.right_ng
                 });
 
-                //SetTopProgress($"Done • OK {result.ok_count} • NG {result.ng_count}", indeterminate: false, value: 100);
-                //LogOk($"Detect done. Model={modelName} OK={result.ok_count} NG={result.ng_count} ({sw.ElapsedMilliseconds} ms)");
+                SetTopProgress($"Done • L {result.left_ok}/{result.left_ng} • R {result.right_ok}/{result.right_ng}", indeterminate: false, value: 100);
+                LogOk($"Detect LR done. Model={modelName} Left OK={result.left_ok} NG={result.left_ng} | Right OK={result.right_ok} NG={result.right_ng} ({sw.ElapsedMilliseconds} ms)");
             }
             catch (Exception ex)
             {
@@ -1826,19 +2095,7 @@ namespace PCB_Inspection_System
 
         private void ResetTotalsAndHistory()
         {
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(ResetTotalsAndHistory));
-                return;
-            }
-
-            _totalOk = 0;
-            _totalNg = 0;
-            _lbTotalOk.Text = "0";
-            _lbTotalNg.Text = "0";
-            _history.Clear();
-            UpdateHistoryEmptyState();
-            LogInfo("Refresh: cleared TOTAL + HISTORY.");
+            ResetDetectState(clearHistory: true, clearResultPreview: true, logMessage: "Refresh: cleared current detect, total and history.");
         }
 
         private void UpdateHistoryEmptyState()
@@ -1987,7 +2244,7 @@ namespace PCB_Inspection_System
             {
                 DataPropertyName = nameof(DetectHistoryRow.Timestamp),
                 HeaderText = "Time",
-                FillWeight = 34,
+                FillWeight = isLRimage ? 20 : 34,
                 DefaultCellStyle = new DataGridViewCellStyle
                 {
                     Format = "HH:mm:ss",
@@ -1999,36 +2256,39 @@ namespace PCB_Inspection_System
             {
                 DataPropertyName = nameof(DetectHistoryRow.Model),
                 HeaderText = "Model",
-                FillWeight = 34
+                FillWeight = isLRimage ? 24 : 34
             });
 
-            gv.Columns.Add(new DataGridViewTextBoxColumn
+            if (isLRimage)
             {
-                DataPropertyName = nameof(DetectHistoryRow.OK),
-                HeaderText = "OK",
-                FillWeight = 16,
-                DefaultCellStyle = new DataGridViewCellStyle
-                {
-                    ForeColor = Theme.Ok,
-                    Alignment = DataGridViewContentAlignment.MiddleLeft,
-                    Padding = new Padding(8, 0, 8, 0)
-                }
-            });
-
-            gv.Columns.Add(new DataGridViewTextBoxColumn
+                gv.Columns.Add(CreateHistoryMetricColumn(nameof(DetectHistoryRow.LeftOK), "L OK", Theme.Ok));
+                gv.Columns.Add(CreateHistoryMetricColumn(nameof(DetectHistoryRow.LeftNG), "L NG", Theme.Ng));
+                gv.Columns.Add(CreateHistoryMetricColumn(nameof(DetectHistoryRow.RightOK), "R OK", Theme.Ok));
+                gv.Columns.Add(CreateHistoryMetricColumn(nameof(DetectHistoryRow.RightNG), "R NG", Theme.Ng));
+            }
+            else
             {
-                DataPropertyName = nameof(DetectHistoryRow.NG),
-                HeaderText = "NG",
-                FillWeight = 16,
-                DefaultCellStyle = new DataGridViewCellStyle
-                {
-                    ForeColor = Theme.Ng,
-                    Alignment = DataGridViewContentAlignment.MiddleLeft,
-                    Padding = new Padding(8, 0, 8, 0)
-                }
-            });
+                gv.Columns.Add(CreateHistoryMetricColumn(nameof(DetectHistoryRow.OK), "OK", Theme.Ok));
+                gv.Columns.Add(CreateHistoryMetricColumn(nameof(DetectHistoryRow.NG), "NG", Theme.Ng));
+            }
 
             gv.ResumeLayout();
+        }
+
+        private DataGridViewTextBoxColumn CreateHistoryMetricColumn(string propertyName, string headerText, Color color)
+        {
+            return new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = propertyName,
+                HeaderText = headerText,
+                FillWeight = isLRimage ? 14 : 16,
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    ForeColor = color,
+                    Alignment = DataGridViewContentAlignment.MiddleLeft,
+                    Padding = new Padding(8, 0, 8, 0)
+                }
+            };
         }
 
 
@@ -2053,6 +2313,10 @@ namespace PCB_Inspection_System
             public string Model { get; set; } = "";
             public int OK { get; set; }
             public int NG { get; set; }
+            public int LeftOK { get; set; }
+            public int LeftNG { get; set; }
+            public int RightOK { get; set; }
+            public int RightNG { get; set; }
         }
 
         private readonly record struct LogItem(string Tag, string Message, Color Color);
@@ -2313,6 +2577,7 @@ namespace PCB_Inspection_System
             if (_viewportCard != null)
                 _viewportCard.Padding = compact ? new Padding(10) : new Padding(12);
 
+            ApplyRightPanelMetricSizing();
             PositionHistoryEmptyLabel();
             ApplyViewportLayout(animated: false);
         }
