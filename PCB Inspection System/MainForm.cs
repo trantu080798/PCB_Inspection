@@ -72,6 +72,11 @@ namespace PCB_Inspection_System
         private ComboBox _cbModel = null!;
         private ModernButton _btnRestartServer = null!;
         private ModernButton _btnDetect = null!;
+
+        // --- Thêm biến cho 2 nút mới ---
+        private ModernButton _btnCapture = null!;
+        private ModernButton _btnCollect = null!;
+
         private ModernButton _btnRefresh = null!;
         private Label _lbHistoryEmpty = null!;
 
@@ -79,6 +84,8 @@ namespace PCB_Inspection_System
         private Label _lbNg = null!;
         private Label _lbTotalOk = null!;
         private Label _lbTotalNg = null!;
+        private DetectResult Result = null;
+        private DetectResultLR ResultLF = null;
 
         private System.Windows.Forms.Timer? _viewAnimTimer;
         private readonly Stopwatch _viewAnimSw = new();
@@ -192,7 +199,7 @@ namespace PCB_Inspection_System
         private async Task RunDetectShortcutAsync()
         {
             if (!_isDetecting)
-                if(isLRimage)
+                if (isLRimage)
                     await DetectLRAsync();
                 else
                     await DetectAsync();
@@ -255,7 +262,7 @@ namespace PCB_Inspection_System
                 Margin = new Padding(0)
             };
             _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            _root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 360f));
+            _root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 400f)); // TĂNG TỪ 360 LÊN 400 ĐỂ CHỐNG LẸM
             _root.RowStyles.Add(new RowStyle(SizeType.Absolute, 78f));
             _root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
             _root.RowStyles.Add(new RowStyle(SizeType.Absolute, 120f));
@@ -626,7 +633,6 @@ namespace PCB_Inspection_System
             WireDragMove(logoHost);
         }
 
-
         private void BuildRightPanel()
         {
             _rightCard = Card(Theme.Surface);
@@ -638,7 +644,7 @@ namespace PCB_Inspection_System
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 10,
+                RowCount = 12, // Tăng lên 12 dòng để chứa nút Capture/Collect
                 BackColor = Color.Transparent,
                 Margin = new Padding(0),
                 Padding = new Padding(0)
@@ -649,10 +655,12 @@ namespace PCB_Inspection_System
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 44f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 112f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f));
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f)); // Spacer
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f)); // Dành cho nút Capture/Collect
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f)); // Spacer
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 130f)); // Card Current Detect
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 14f)); // Spacer
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // Total History tự co giãn
             _rightCard.Controls.Add(grid);
 
             grid.Controls.Add(new Label
@@ -728,6 +736,53 @@ namespace PCB_Inspection_System
             };
             grid.Controls.Add(_btnDetect, 0, 5);
 
+            var actionWrap = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 1,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            actionWrap.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            actionWrap.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8f)); // Khoảng cách
+            actionWrap.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+
+            _btnCapture = new ModernButton
+            {
+                Dock = DockStyle.Fill,
+                Text = "Capture",
+                BackColor = Theme.Btn,
+                HoverBackColor = Theme.BtnHover,
+                PressedBackColor = Theme.BtnPressed,
+                ForeColor = Theme.Text,
+                CornerRadius = 12,
+                Font = new Font("Segoe UI Semibold", 9.5f),
+                Margin = new Padding(0)
+            };
+            _btnCapture.Click += BtnCapture_Click;
+
+            _btnCollect = new ModernButton
+            {
+                Dock = DockStyle.Fill,
+                Text = "Collect",
+                BackColor = Theme.Btn,
+                HoverBackColor = Theme.BtnHover,
+                PressedBackColor = Theme.BtnPressed,
+                ForeColor = Theme.Text,
+                CornerRadius = 12,
+                Font = new Font("Segoe UI Semibold", 9.5f),
+                Margin = new Padding(0)
+            };
+            _btnCollect.Click += BtnCollect_Click;
+
+            actionWrap.Controls.Add(_btnCapture, 0, 0);
+            actionWrap.Controls.Add(_btnCollect, 2, 0);
+
+            grid.Controls.Add(actionWrap, 0, 7); // Chèn vào hàng thứ 7
+            // ------------------------------------------------
+
             var cardCurrent = Card(Theme.Surface2);
             cardCurrent.CornerRadius = 15;
             cardCurrent.Padding = new Padding(12);
@@ -777,7 +832,7 @@ namespace PCB_Inspection_System
 
             curWrap.Controls.Add(curStats, 0, 1);
             cardCurrent.Controls.Add(curWrap);
-            grid.Controls.Add(cardCurrent, 0, 7);
+            grid.Controls.Add(cardCurrent, 0, 9); // Chuyển sang hàng 9
 
             var cardTotalHistory = Card(Theme.Surface2);
             cardTotalHistory.CornerRadius = 15;
@@ -796,7 +851,7 @@ namespace PCB_Inspection_System
             };
             wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 32f));
             wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 10f));
-            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 76f));
+            wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 90f));
             wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 12f));
             wrap.RowStyles.Add(new RowStyle(SizeType.Absolute, 1f));
             wrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
@@ -933,7 +988,162 @@ namespace PCB_Inspection_System
             wrap.Controls.Add(historyHost, 0, 5);
 
             cardTotalHistory.Controls.Add(wrap);
-            grid.Controls.Add(cardTotalHistory, 0, 9);
+            grid.Controls.Add(cardTotalHistory, 0, 11); // Chuyển sang hàng 11
+        }
+
+        private async void BtnCollect_Click(object? sender, EventArgs e)
+        {
+            Bitmap? safeFrame = null;
+            try
+            {
+                DisableRightControls(true);
+                SetTopProgress("Collecting...", indeterminate: true);
+                LogInfo("Đang tiến hành Collect dữ liệu...");
+
+                if (_cbModel.SelectedItem == null)
+                {
+                    LogError("Chưa chọn model nào.");
+                    MessageBox.Show("Vui lòng chọn một model trước khi Collect!", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                string selectedModel = _cbModel.SelectedItem.ToString() ?? "";
+                lock (_frameLock)
+                {
+                    if (_currentFrame != null)
+                        safeFrame = CopyBitmap(_currentFrame);
+                }
+
+                if (safeFrame == null)
+                {
+                    LogError("Chưa có frame từ camera để Collect.");
+                    MessageBox.Show("Chưa có hình ảnh từ camera!", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+ 
+                string appDir = AppDomain.CurrentDomain.BaseDirectory;
+                string collectDirPath = Path.Combine(appDir, "Data", selectedModel, "Collect");
+                string imageDirPath = Path.Combine(collectDirPath, "Image");
+                string logDirPath = Path.Combine(collectDirPath, "Log");
+
+                if (!Directory.Exists(collectDirPath)) Directory.CreateDirectory(collectDirPath);
+                if (!Directory.Exists(imageDirPath)) Directory.CreateDirectory(imageDirPath);
+                if (!Directory.Exists(logDirPath)) Directory.CreateDirectory(logDirPath);
+
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+                string baseFileName = $"capture_{timestamp}";
+
+                string imageFilePath = Path.Combine(imageDirPath, $"{baseFileName}.png");
+                string logFilePath = Path.Combine(logDirPath, $"{baseFileName}.txt");
+                string image_base64 = null; 
+                string label_lines = null ; 
+                if (isLRimage )
+                {
+                    if (ResultLF == null) return;
+                    image_base64 = ResultLF.image_base64;
+                    label_lines  = ResultLF.label_lines;
+
+                }
+                else
+                {
+                    if (Result == null) return;
+                    image_base64 = Result.image_base64;
+                    label_lines = Result.label_lines;
+                }
+               
+                string timeString = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+
+               
+                await Task.Run(() =>
+                {
+               
+                    safeFrame.Save(imageFilePath, ImageFormat.Png);
+
+                    string csvContent = "Time,Model,Image_Base64,Label_Lines\n" +
+                                        $"{timeString},{selectedModel},{image_base64},{label_lines}";
+
+           
+                    File.WriteAllText(logFilePath, csvContent);
+                });
+
+                MessageBox.Show($"Collect thành công!\nẢnh: {baseFileName}.png\nLog: {baseFileName}.csv", "Collect", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                LogOk($"Collect xong. Đã lưu vào Data/{selectedModel}/Collect/");
+            }
+            catch (Exception ex)
+            {
+                LogError("Lỗi khi Collect: " + ex.Message);
+                SetTopProgress("Collect error", indeterminate: false, value: 0);
+                MessageBox.Show($"Lỗi khi Collect dữ liệu:\n{ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                safeFrame?.Dispose();
+                DisableRightControls(false);
+                SetTopProgress("Ready", indeterminate: false, value: 0);
+            }
+        }
+
+        private async void BtnCapture_Click(object? sender, EventArgs e)
+        {
+            Bitmap? safeFrame = null;
+            try
+            {
+                DisableRightControls(true);
+                SetTopProgress("Capturing...", indeterminate: true);
+                LogInfo("Đang tiến hành Capture...");
+                if (_cbModel.SelectedItem == null)
+                {
+                    LogError("Chưa chọn model nào.");
+                    MessageBox.Show("Vui lòng chọn một model trước khi Capture!", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                string selectedModel = _cbModel.SelectedItem.ToString() ?? "";
+                lock (_frameLock)
+                {
+                    if (_currentFrame != null)
+                        safeFrame = CopyBitmap(_currentFrame);
+                }
+
+                if (safeFrame == null)
+                {
+                    LogError("Chưa có frame từ camera để Capture.");
+                    MessageBox.Show("Chưa có hình ảnh từ camera!", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                string appDir = AppDomain.CurrentDomain.BaseDirectory;
+                string captureDirPath = Path.Combine(appDir, "Data", selectedModel, "Capture");
+
+                if (!Directory.Exists(captureDirPath))
+                {
+                    Directory.CreateDirectory(captureDirPath);
+                    LogInfo($"Đã tạo thư mục mới: {captureDirPath}");
+                }
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+                string fileName = $"capture_{timestamp}.png";
+                string filePath = Path.Combine(captureDirPath, fileName);
+
+      
+                await Task.Run(() =>
+                {
+                    safeFrame.Save(filePath, ImageFormat.Png);
+                });
+
+              
+                MessageBox.Show($"Đã lưu ảnh thành công:\n{fileName}", "Capture", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                LogOk($"Capture thành công lưu tại: {fileName}");
+            }
+            catch (Exception ex)
+            {
+                LogError("Lỗi khi Capture: " + ex.Message);
+                SetTopProgress("Capture error", indeterminate: false, value: 0);
+                MessageBox.Show($"Lỗi khi lưu ảnh:\n{ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                safeFrame?.Dispose(); 
+                DisableRightControls(false);
+                SetTopProgress("Ready", indeterminate: false, value: 0);
+            }
         }
 
         private RoundedPanel MetricChip(string title, Color valueColor, out Label valueLabel)
@@ -945,9 +1155,9 @@ namespace PCB_Inspection_System
                 BorderColor = Theme.MetricBorder,
                 BorderThickness = 1f,
                 CornerRadius = 14,
-                Padding = new Padding(14, 10, 14, 10),
-                Margin = new Padding(0),
-                MinimumSize = new Size(0, 72)
+               
+                Padding = new Padding(12, 4, 12, 4), 
+                MinimumSize = new Size(0, 60)
             };
 
             var g = new TableLayoutPanel
@@ -1037,7 +1247,6 @@ namespace PCB_Inspection_System
             _logCard.Controls.Add(wrap);
             _logCard.Controls.Add(header);
         }
-
 
         private void ToggleMaximize()
         {
@@ -1206,7 +1415,7 @@ namespace PCB_Inspection_System
                     try
                     {
                         string[] lines = File.ReadAllLines(param_path);
-                        if (int.TryParse(lines[3],out int devNum) && devNum >= 0 && devNum < _videoDevices.Count)
+                        if (int.TryParse(lines[3], out int devNum) && devNum >= 0 && devNum < _videoDevices.Count)
                         {
                             device_num = devNum;
                         }
@@ -1250,8 +1459,7 @@ namespace PCB_Inspection_System
             try
             {
                 raw = (Bitmap)e.Frame.Clone();
-                   //xoay 180 de camera o tren cung khong bi nguoc
-
+                raw.RotateFlip(RotateFlipType.Rotate180FlipNone);
                 Bitmap roiBitmap = raw.Clone(roi, PixelFormat.Format24bppRgb);  //cut toi
                 storeCopy = new Bitmap(1280, 720, PixelFormat.Format24bppRgb);  // copy de dua vao ai va hien thi, tranh loi xung dot khi camera cap nhat lien tuc resize de dua ve 1280x720
                 using (var g = Graphics.FromImage(storeCopy))
@@ -1275,18 +1483,15 @@ namespace PCB_Inspection_System
                     using (Pen pen = new Pen(Color.Red, 5))
                     {
                         g.DrawRectangle(pen, roi);
-                        g.DrawLine(pen, (roi.Left + roi.Right)/2, roi.Top, (roi.Left + roi.Right) / 2, roi.Bottom);
+                        g.DrawLine(pen, (roi.Left + roi.Right) / 2, roi.Top, (roi.Left + roi.Right) / 2, roi.Bottom);
                     }
                 }
                 displayFrame = new Bitmap(640, 360, PixelFormat.Format24bppRgb);
                 using (var g = Graphics.FromImage(displayFrame))
                 {
                     g.InterpolationMode = InterpolationMode.Low;
-                    
+
                     g.DrawImage(raw, 0, 0, 640, 360);
-                    //Pen redPen = new Pen(Color.Red, 3);
-                    //int x = displayFrame.Width / 2;
-                    //g.DrawLine(redPen, x, 0, x, displayFrame.Height);
                 }
 
                 if (_isClosing || _pbLive.IsDisposed || !_pbLive.IsHandleCreated)
@@ -1305,7 +1510,6 @@ namespace PCB_Inspection_System
                     }
 
                     var oldImg = _pbLive.Image;
-                    displayFrame.RotateFlip(RotateFlipType.Rotate180FlipNone);
                     _pbLive.Image = displayFrame;
                     displayFrame = null;
                     oldImg?.Dispose();
@@ -1526,14 +1730,16 @@ namespace PCB_Inspection_System
                         StopCamera();
                         StartCamera();
                     }
-                    else{
+                    else
+                    {
                         LogError("Invalid camera parameters in camera_parameter.txt");
                     }
-                    if(int.TryParse(lines[2], out total_object)){
+                    if (int.TryParse(lines[2], out total_object))
+                    {
                         total_objects_detected = total_object;
                         LogInfo($"Camera parameter - Total Object: {total_object}");
                     }
-                    if(lines.Count() >= 5 && lines[4] == "lr")
+                    if (lines.Count() >= 5 && lines[4] == "lr")
                     {
                         isLRimage = true;
                     }
@@ -1582,35 +1788,36 @@ namespace PCB_Inspection_System
                 SetTopProgress("Detecting...", indeterminate: true);
                 LogInfo($"Detect started. Model={modelName}");
 
-                var result = await DetectFromBitmapAsync(safeFrame);
-                if (result == null)
+                Result = await  DetectFromBitmapAsync(safeFrame);
+                if (Result == null)
                 {
                     SetTopProgress("Detect finished (no result)", indeterminate: false, value: 0);
                     LogError("Detect trả về rỗng / image_base64 empty.");
                     return;
                 }
-                if (result.ok_count + result.ng_count != total_objects_detected)
+                if (Result.ok_count + Result.ng_count != total_objects_detected)
                 {
                     for (int i = 0; i < 3; i++)
                     {
                         SetTopProgress($"Re-detecting... Attempt {i + 2}/3", indeterminate: true);
-                        LogInfo($"Số lượng đối tượng phát hiện không đúng (OK={result.ok_count} NG={result.ng_count}), thử lại lần {i + 2}/3...");
-                        result = await DetectFromBitmapAsync(safeFrame);
-                        if (result != null && result.ok_count + result.ng_count == total_objects_detected)
+                        LogInfo($"Số lượng đối tượng phát hiện không đúng (OK={Result.ok_count} NG={Result.ng_count}), thử lại lần {i + 2}/3...");
+                        Result = await DetectFromBitmapAsync(safeFrame);
+                        if (Result != null && Result.ok_count + Result.ng_count == total_objects_detected)
                             break;
                     }
                 }
-                if (result.ok_count + result.ng_count != total_objects_detected){
+                if (Result.ok_count + Result.ng_count != total_objects_detected)
+                {
                     MessageBox.Show($"Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     _isDetecting = false;
                     return;
                 }
 
-                _lbOk.Text = result.ok_count.ToString();
-                _lbNg.Text = result.ng_count.ToString();
+                _lbOk.Text = Result.ok_count.ToString();
+                _lbNg.Text = Result.ng_count.ToString();
 
-                _totalOk += result.ok_count;
-                _totalNg += result.ng_count;
+                _totalOk += Result.ok_count;
+                _totalNg += Result.ng_count;
                 _lbTotalOk.Text = _totalOk.ToString();
                 _lbTotalNg.Text = _totalNg.ToString();
 
@@ -1619,12 +1826,12 @@ namespace PCB_Inspection_System
                 {
                     Timestamp = ts,
                     Model = modelName,
-                    OK = result.ok_count,
-                    NG = result.ng_count,
+                    OK = Result.ok_count,
+                    NG = Result.ng_count,
                 });
 
-                SetTopProgress($"Done • OK {result.ok_count} • NG {result.ng_count}", indeterminate: false, value: 100);
-                LogOk($"Detect done. Model={modelName} OK={result.ok_count} NG={result.ng_count} ({sw.ElapsedMilliseconds} ms)");
+                SetTopProgress($"Done • OK {Result.ok_count} • NG {Result.ng_count}", indeterminate: false, value: 100);
+                LogOk($"Detect done. Model={modelName} OK={Result.ok_count} NG={Result.ng_count} ({sw.ElapsedMilliseconds} ms)");
             }
             catch (Exception ex)
             {
@@ -1673,6 +1880,8 @@ namespace PCB_Inspection_System
                 LogInfo($"Detect started. Model={modelName}");
 
                 var result = await DetectLRFromBitmapAsync(safeFrame);
+                ResultLF = result;
+
                 if (result == null)
                 {
                     SetTopProgress("Detect finished (no result)", indeterminate: false, value: 0);
@@ -1684,19 +1893,18 @@ namespace PCB_Inspection_System
                     for (int i = 0; i < 2; i++)
                     {
                         SetTopProgress($"Re-detecting... Attempt {i + 2}/3", indeterminate: true);
-                        //LogInfo($"Số lượng đối tượng phát hiện không đúng (OK={result.ok_count} NG={result.ng_count}), thử lại lần {i + 2}/3...");
                         result = await DetectLRFromBitmapAsync(safeFrame);
                         if (result != null && result.right_ok + result.right_ng + result.left_ok + result.left_ng != total_objects_detected)
                             break;
                     }
                 }
-                if ((result.right_ok + result.right_ng) != total_objects_detected/2 && (result.left_ok + result.left_ng) != total_objects_detected/2)
+                if ((result.right_ok + result.right_ng) != total_objects_detected / 2 && (result.left_ok + result.left_ng) != total_objects_detected / 2)
                 {
                     MessageBox.Show($"Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     _isDetecting = false;
                     return;
                 }
-                //MessageBox.Show($"Kết quả phát hiện:\n\nBên trái: OK={result.left_ok} NG={result.left_ng}\nBên phải: OK={result.right_ok} NG={result.right_ng}", "Kết quả Detect", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
                 int total_OK = result.right_ok + result.left_ok;
                 int total_NG = result.right_ng + result.left_ng;
                 _lbOk.Text = total_OK.ToString();
@@ -1734,12 +1942,6 @@ namespace PCB_Inspection_System
         private async Task<DetectResult?> DetectFromBitmapAsync(Bitmap frame)
         {
             using var ms = new MemoryStream();
-            //var encoder = ImageCodecInfo.GetImageEncoders()
-            //.First(c => c.FormatID == ImageFormat.Jpeg.Guid);
-
-            //var encoderParams = new EncoderParameters(1);
-            //encoderParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 95L);
-            //frame.Save(ms, encoder, encoderParams);
             frame.Save(ms, ImageFormat.Png);
             ms.Position = 0;
 
@@ -1766,7 +1968,6 @@ namespace PCB_Inspection_System
             byte[] bytes = Convert.FromBase64String(result.image_base64);
             using var ms2 = new MemoryStream(bytes);
             using var tmp = new Bitmap(ms2);
-            tmp.RotateFlip(RotateFlipType.Rotate180FlipNone);
             var oldImg = _pbResult.Image;
             _pbResult.Image = new Bitmap(tmp);
             oldImg?.Dispose();
@@ -1776,7 +1977,6 @@ namespace PCB_Inspection_System
         {
             using var ms = new MemoryStream();
             frame.Save(ms, ImageFormat.Png);
-           // frame.Save(ms, ImageFormat.Jpeg);
             ms.Position = 0;
 
             using var form = new MultipartFormDataContent();
@@ -1802,7 +2002,6 @@ namespace PCB_Inspection_System
             byte[] bytes = Convert.FromBase64String(result.image_base64);
             using var ms2 = new MemoryStream(bytes);
             using var tmp = new Bitmap(ms2);
-            tmp.RotateFlip(RotateFlipType.Rotate180FlipNone);
             var oldImg = _pbResult.Image;
             _pbResult.Image = new Bitmap(tmp);
             oldImg?.Dispose();
@@ -1843,6 +2042,8 @@ namespace PCB_Inspection_System
             _btnRestartServer.Enabled = !busy;
             _cbModel.Enabled = !busy;
             if (_btnRefresh != null) _btnRefresh.Enabled = !busy;
+            if (_btnCapture != null) _btnCapture.Enabled = !busy; // Vô hiệu hoá Capture khi busy
+            if (_btnCollect != null) _btnCollect.Enabled = !busy; // Vô hiệu hoá Collect khi busy
         }
 
         private void SetTopProgress(string text, bool indeterminate, int value = 0)
@@ -2071,6 +2272,7 @@ namespace PCB_Inspection_System
             public int ok_count { get; set; }
             public int ng_count { get; set; }
             public string image_base64 { get; set; } = "";
+            public string label_lines { get; set; } = "";
         }
         public sealed class DetectResultLR
         {
@@ -2079,6 +2281,7 @@ namespace PCB_Inspection_System
             public int right_ok { get; set; }
             public int right_ng { get; set; }
             public string image_base64 { get; set; } = "";
+            public string label_lines { get; set; } = "";
         }
 
         public sealed class DetectHistoryRow
@@ -2334,7 +2537,8 @@ namespace PCB_Inspection_System
             bool shortScreen = height < 860;
 
             _root.Padding = compact ? new Padding(12, 10, 12, 12) : new Padding(16, 12, 16, 14);
-            _root.ColumnStyles[1].Width = compact ? 320f : 360f;
+            // CẬP NHẬT Ở ĐÂY LÊN 360 / 400 ĐỂ CHỐNG LẸM (thay vì 320 / 360 cũ)
+            _root.ColumnStyles[1].Width = compact ? 360f : 400f;
             _root.RowStyles[0].Height = compact ? 72f : 78f;
             _root.RowStyles[2].Height = shortScreen ? 104f : (compact ? 112f : 120f);
 
@@ -2350,7 +2554,6 @@ namespace PCB_Inspection_System
             PositionHistoryEmptyLabel();
             ApplyViewportLayout(animated: false);
         }
-
 
         private sealed class ModernProgressBar : Control
         {
