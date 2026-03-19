@@ -76,15 +76,19 @@ async def shutdown():
 def image_to_base64(img):
     _, buffer = cv2.imencode(".jpg", img)
     return base64.b64encode(buffer).decode("utf-8")
-@app.post("/detect_capture")
-async def detect_capture(request: CaptureRequest):
+@app.post("/detect_lr")
+async def detect_lr(file: UploadFile = File(...)):
 
     try:
-        # Decode base64 → numpy image
-        img_bytes = base64.b64decode(request.image_base64)
-        nparr = np.frombuffer(img_bytes, np.uint8)
+
+        # =============================
+        # READ IMAGE
+        # =============================
+
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        print("IMG SHAPE:", img.shape)
+
         if img is None:
             return JSONResponse(
                 status_code=400,
@@ -92,53 +96,165 @@ async def detect_capture(request: CaptureRequest):
             )
 
         # =============================
-        # UNDISTORT (giữ nguyên như bạn đang dùng)
+        # UNDISTORT
         # =============================
+
         if camera_matrix is not None:
             img = cv2.undistort(img, camera_matrix, dist_coeffs)
+
+        drawing_img = img.copy()
+
+        h, w = drawing_img.shape[:2]
+
+        center_line = w // 2
 
         # =============================
         # YOLO INFERENCE
         # =============================
+
         results = model.predict(
-            img,
-            imgsz=IMGZ,
+            source=drawing_img,
             conf=CONF,
-            iou = IOU,
+            imgsz=IMGZ,
+            verbose=False,
             agnostic_nms=True,
-            verbose=False
+            iou=0.3
         )[0]
 
-        ng_count = 0
-        ok_count = 0
+        # =============================
+        # COUNT
+        # =============================
 
+        left_ok = 0
+        left_ng = 0
+        right_ok = 0
+        right_ng = 0
+        label_lines = []
+        # =============================
+        # LOOP DETECTION
+        # =============================
+        
         for box in results.boxes:
+
             cls = int(box.cls[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-            if cls == NG_CLASS_INDEX:
-                color = (0, 0, 255)
-                ng_count += 1
+            x1, y1, x2, y2 = box.xyxy[0]
+            bw = (x2 - x1) / w
+            bh = (y2 - y1) / h
+            cx = int((x1 + x2) / 2)
+            cy = int((y1 + y2) / 2)
+            label_lines.append(f"{cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+            if cx < center_line:
+
+                if cls == NG_CLASS_INDEX:
+                    left_ng += 1
+                    color = (0,0,255)
+                else:
+                    left_ok += 1
+                    color = (0,255,0)
+
             else:
-                color = (0, 255, 0)
-                ok_count += 1
 
-            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                if cls == NG_CLASS_INDEX:
+                    right_ng += 1
+                    color = (0,0,255)
+                else:
+                    right_ok += 1
+                    color = (0,255,0)
 
-        img_base64 = image_to_base64(img)
+            # DRAW BOX
+            cv2.rectangle(
+                drawing_img,
+                (int(x1), int(y1)),
+                (int(x2), int(y2)),
+                color,
+                2
+            )
+
+            # DRAW CENTER
+            cv2.circle(
+                drawing_img,
+                (cx, cy),
+                4,
+                (255,255,0),
+                -1
+            )
+
+        # =============================
+        # DRAW CENTER LINE
+        # =============================
+
+        cv2.line(
+            drawing_img,
+            (center_line, 0),
+            (center_line, h),
+            (255,0,0),
+            4
+        )
+
+        cv2.putText(
+            drawing_img,
+            "CENTER",
+            (center_line - 80, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (255,0,0),
+            3
+        )
+
+        # =============================
+        # HEADER
+        # =============================
+
+        header_h = int(h * 0.1)
+
+        header = np.zeros((header_h, w, 3), dtype=np.uint8)
+
+        font_scale = h / 1000
+
+        text = f"                             Left:{left_ok}/{left_ng}                                    Right:{right_ok}/{right_ng}"
+
+        cv2.putText(
+            header,
+            text,
+            (20, int(header_h * 0.8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (0,255,255),
+            2
+        )
+
+        final_img = np.vstack((header, drawing_img))
+
+        # =============================
+        # IMAGE -> BASE64
+        # =============================
+
+        img_base64 = image_to_base64(final_img)
+
+        # =============================
+        # RETURN RESULT
+        # =============================
 
         return JSONResponse({
-            "ok_count": ok_count,
-            "ng_count": ng_count,
+
+            "left_ok": left_ok,
+            "left_ng": left_ng,
+            "right_ok": right_ok,
+            "right_ng": right_ng,
+            "label_lines": label_lines,
             "image_base64": img_base64
         })
 
     except Exception as e:
+
         print("ERROR:", str(e))
+
         return JSONResponse(
             status_code=500,
             content={"error": str(e)}
         )
+
 # =============================
 # API ROUTE
 # =============================
@@ -176,10 +292,18 @@ async def detect(file: UploadFile = File(...)):
 
         ng_count = 0
         ok_count = 0
-
+        h, w = img.shape[:2]
+        label_lines = []
         for box in results.boxes:
             cls = int(box.cls[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+            cx = ((x1 + x2) / 2) / w
+            cy = ((y1 + y2) / 2) / h
+            bw = (x2 - x1) / w
+            bh = (y2 - y1) / h
+
+            label_lines.append(f"{cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
 
             if cls == NG_CLASS_INDEX:
                 color = (0, 0, 255)
@@ -195,7 +319,8 @@ async def detect(file: UploadFile = File(...)):
         return JSONResponse({
             "ok_count": ok_count,
             "ng_count": ng_count,
-            "image_base64": img_base64
+            "image_base64": img_base64,
+            "label_lines": label_lines
         })
 
     except Exception as e:

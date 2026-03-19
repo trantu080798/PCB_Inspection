@@ -181,8 +181,8 @@ while True:
         if is_live_viewing:
             ret, frame = cap.read()
             if ret:
-                if camera_matrix is not None:
-                    frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
+                # if camera_matrix is not None:
+                #     frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
 
                 current_frame = frame.copy()
                 display_live = frame.copy()

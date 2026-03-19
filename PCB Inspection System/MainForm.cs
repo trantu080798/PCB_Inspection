@@ -86,7 +86,13 @@ namespace PCB_Inspection_System
         private bool _hideResultAfterAnim;
         private int total_objects_detected;
         private bool isLRimage = false;
+        private int roiW = 1920;
+        private int roiH = 1080;
+        private int startX;   // 320
+        private int startY;   // 180
 
+        Rectangle roi = new Rectangle();
+        private int cameraDevice = 0;
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
 
@@ -1177,7 +1183,7 @@ namespace PCB_Inspection_System
             return new Rectangle(x, y, w, h);
         }
 
-        private void StartCamera(int width = 1280, int height = 720)
+        private void StartCamera()
         {
             try
             {
@@ -1217,7 +1223,7 @@ namespace PCB_Inspection_System
                 _videoSource = new VideoCaptureDevice(_videoDevices[device_num].MonikerString);
                 foreach (var cap in _videoSource.VideoCapabilities)
                 {
-                    if (cap.FrameSize.Width == width && cap.FrameSize.Height == height)
+                    if (cap.FrameSize.Width == 2560 && cap.FrameSize.Height == 1440)
                     {
                         _videoSource.VideoResolution = cap;
                         break;
@@ -1244,9 +1250,16 @@ namespace PCB_Inspection_System
             try
             {
                 raw = (Bitmap)e.Frame.Clone();
-                raw.RotateFlip(RotateFlipType.Rotate180FlipNone);
-                storeCopy = (Bitmap)raw.Clone();
+                   //xoay 180 de camera o tren cung khong bi nguoc
 
+                Bitmap roiBitmap = raw.Clone(roi, PixelFormat.Format24bppRgb);  //cut toi
+                storeCopy = new Bitmap(1280, 720, PixelFormat.Format24bppRgb);  // copy de dua vao ai va hien thi, tranh loi xung dot khi camera cap nhat lien tuc resize de dua ve 1280x720
+                using (var g = Graphics.FromImage(storeCopy))
+                {
+                    g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                    g.DrawImage(roiBitmap, 0, 0, 1280, 720);
+                }
+                roiBitmap.Dispose();
                 lock (_frameLock)
                 {
                     var old = _currentFrame;
@@ -1257,16 +1270,23 @@ namespace PCB_Inspection_System
 
                 _displayFrameCounter++;
                 if (_displayFrameCounter % 3 != 0) return;
-
+                using (var g = Graphics.FromImage(raw))
+                {
+                    using (Pen pen = new Pen(Color.Red, 5))
+                    {
+                        g.DrawRectangle(pen, roi);
+                        g.DrawLine(pen, (roi.Left + roi.Right)/2, roi.Top, (roi.Left + roi.Right) / 2, roi.Bottom);
+                    }
+                }
                 displayFrame = new Bitmap(640, 360, PixelFormat.Format24bppRgb);
                 using (var g = Graphics.FromImage(displayFrame))
                 {
                     g.InterpolationMode = InterpolationMode.Low;
                     
                     g.DrawImage(raw, 0, 0, 640, 360);
-                    Pen redPen = new Pen(Color.Red, 3);
-                    int x = displayFrame.Width / 2;
-                    g.DrawLine(redPen, x, 0, x, displayFrame.Height);
+                    //Pen redPen = new Pen(Color.Red, 3);
+                    //int x = displayFrame.Width / 2;
+                    //g.DrawLine(redPen, x, 0, x, displayFrame.Height);
                 }
 
                 if (_isClosing || _pbLive.IsDisposed || !_pbLive.IsHandleCreated)
@@ -1285,6 +1305,7 @@ namespace PCB_Inspection_System
                     }
 
                     var oldImg = _pbLive.Image;
+                    displayFrame.RotateFlip(RotateFlipType.Rotate180FlipNone);
                     _pbLive.Image = displayFrame;
                     displayFrame = null;
                     oldImg?.Dispose();
@@ -1495,13 +1516,15 @@ namespace PCB_Inspection_System
                 try
                 {
                     string[] lines = File.ReadAllLines(param_path);
-                    int width = 0, height = 0;
                     int total_object = 0;
-                    if (int.TryParse(lines[0], out width) && int.TryParse(lines[1], out height))
+                    if (int.TryParse(lines[0], out roiW) && int.TryParse(lines[1], out roiH))
                     {
-                        LogInfo($"Camera parameters - Width: {width}, Height: {height}");
+                        startX = (2560 - roiW) / 2;   // 320
+                        startY = (1440 - roiH) / 2;   // 180
+                        roi = new Rectangle(startX, startY, roiW, roiH);
+                        LogInfo($"Camera parameters - Width: {roiW}, Height: {roiH}");
                         StopCamera();
-                        StartCamera(width, height);
+                        StartCamera();
                     }
                     else{
                         LogError("Invalid camera parameters in camera_parameter.txt");
@@ -1656,9 +1679,9 @@ namespace PCB_Inspection_System
                     LogError("Detect trả về rỗng / image_base64 empty.");
                     return;
                 }
-                if (result.right_ok + result.right_ng + result.left_ok + result.left_ng != total_objects_detected)
+                if ((result.right_ok + result.right_ng) != total_objects_detected / 2 && (result.left_ok + result.left_ng) != total_objects_detected / 2)
                 {
-                    for (int i = 0; i < 3; i++)
+                    for (int i = 0; i < 2; i++)
                     {
                         SetTopProgress($"Re-detecting... Attempt {i + 2}/3", indeterminate: true);
                         //LogInfo($"Số lượng đối tượng phát hiện không đúng (OK={result.ok_count} NG={result.ng_count}), thử lại lần {i + 2}/3...");
@@ -1667,32 +1690,34 @@ namespace PCB_Inspection_System
                             break;
                     }
                 }
-                //if (result.right_ok_count + result.right_ng_count + result.left_ok_count + result.left_ng_count != total_objects_detected)
-                //{
-                //    MessageBox.Show($"Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                //    _isDetecting = false;
-                //    return;
-                //}
-                MessageBox.Show($"Kết quả phát hiện:\n\nBên trái: OK={result.left_ok} NG={result.left_ng}\nBên phải: OK={result.right_ok} NG={result.right_ng}", "Kết quả Detect", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                //_lbOk.Text = result.ok_count.ToString();
-                //_lbNg.Text = result.ng_count.ToString();
+                if ((result.right_ok + result.right_ng) != total_objects_detected/2 && (result.left_ok + result.left_ng) != total_objects_detected/2)
+                {
+                    MessageBox.Show($"Cảnh báo: Số lượng đối tượng phát hiện không đúng, vui lòng kiểm tra lại môi trường test.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    _isDetecting = false;
+                    return;
+                }
+                //MessageBox.Show($"Kết quả phát hiện:\n\nBên trái: OK={result.left_ok} NG={result.left_ng}\nBên phải: OK={result.right_ok} NG={result.right_ng}", "Kết quả Detect", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                int total_OK = result.right_ok + result.left_ok;
+                int total_NG = result.right_ng + result.left_ng;
+                _lbOk.Text = total_OK.ToString();
+                _lbNg.Text = total_NG.ToString();
 
-                //_totalOk += result.ok_count;
-                //_totalNg += result.ng_count;
+                _totalOk += total_OK;
+                _totalNg += total_NG;
                 _lbTotalOk.Text = _totalOk.ToString();
                 _lbTotalNg.Text = _totalNg.ToString();
 
                 sw.Stop();
                 AddHistoryRow(new DetectHistoryRow
                 {
-                    //Timestamp = ts,
-                    //Model = modelName,
-                    //OK = result.ok_count,
-                    //NG = result.ng_count,
+                    Timestamp = ts,
+                    Model = modelName,
+                    OK = total_OK,
+                    NG = total_NG,
                 });
 
-                //SetTopProgress($"Done • OK {result.ok_count} • NG {result.ng_count}", indeterminate: false, value: 100);
-                //LogOk($"Detect done. Model={modelName} OK={result.ok_count} NG={result.ng_count} ({sw.ElapsedMilliseconds} ms)");
+                SetTopProgress($"Done • OK {total_OK} • NG {total_NG}", indeterminate: false, value: 100);
+                LogOk($"Detect done. Model={modelName} OK={total_OK} NG={total_NG} ({sw.ElapsedMilliseconds} ms)");
             }
             catch (Exception ex)
             {
@@ -1709,11 +1734,17 @@ namespace PCB_Inspection_System
         private async Task<DetectResult?> DetectFromBitmapAsync(Bitmap frame)
         {
             using var ms = new MemoryStream();
-            frame.Save(ms, ImageFormat.Jpeg);
+            //var encoder = ImageCodecInfo.GetImageEncoders()
+            //.First(c => c.FormatID == ImageFormat.Jpeg.Guid);
+
+            //var encoderParams = new EncoderParameters(1);
+            //encoderParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 95L);
+            //frame.Save(ms, encoder, encoderParams);
+            frame.Save(ms, ImageFormat.Png);
             ms.Position = 0;
 
             using var form = new MultipartFormDataContent();
-            form.Add(new ByteArrayContent(ms.ToArray()), "file", "frame.jpg");
+            form.Add(new ByteArrayContent(ms.ToArray()), "file", "frame.png");
 
             using var resp = await _http.PostAsync("http://127.0.0.1:8000/detect", form);
             var json = await resp.Content.ReadAsStringAsync();
@@ -1735,6 +1766,7 @@ namespace PCB_Inspection_System
             byte[] bytes = Convert.FromBase64String(result.image_base64);
             using var ms2 = new MemoryStream(bytes);
             using var tmp = new Bitmap(ms2);
+            tmp.RotateFlip(RotateFlipType.Rotate180FlipNone);
             var oldImg = _pbResult.Image;
             _pbResult.Image = new Bitmap(tmp);
             oldImg?.Dispose();
@@ -1743,11 +1775,12 @@ namespace PCB_Inspection_System
         private async Task<DetectResultLR?> DetectLRFromBitmapAsync(Bitmap frame)
         {
             using var ms = new MemoryStream();
-            frame.Save(ms, ImageFormat.Jpeg);
+            frame.Save(ms, ImageFormat.Png);
+           // frame.Save(ms, ImageFormat.Jpeg);
             ms.Position = 0;
 
             using var form = new MultipartFormDataContent();
-            form.Add(new ByteArrayContent(ms.ToArray()), "file", "frame.jpg");
+            form.Add(new ByteArrayContent(ms.ToArray()), "file", "frame.png");
 
             using var resp = await _http.PostAsync("http://127.0.0.1:8000/detect_lr", form);
             var json = await resp.Content.ReadAsStringAsync();
@@ -1769,6 +1802,7 @@ namespace PCB_Inspection_System
             byte[] bytes = Convert.FromBase64String(result.image_base64);
             using var ms2 = new MemoryStream(bytes);
             using var tmp = new Bitmap(ms2);
+            tmp.RotateFlip(RotateFlipType.Rotate180FlipNone);
             var oldImg = _pbResult.Image;
             _pbResult.Image = new Bitmap(tmp);
             oldImg?.Dispose();
